@@ -53,7 +53,17 @@ routing_tools.register(mcp)
 
 def main():
     """Entry point for the MCP server."""
-    mcp.run()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "http"])
+    parser.add_argument("--port", type=int, default=3007)
+    parser.add_argument("--host", default="0.0.0.0")
+    args = parser.parse_args()
+
+    if args.transport == "http":
+        mcp.run(transport="streamable-http", port=args.port, host=args.host)
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,25 @@
+services:
+  mcp-komoot:
+    build: .
+    container_name: mcp-komoot
+    restart: unless-stopped
+    environment:
+      - KOMOOT_EMAIL=${KOMOOT_EMAIL}
+      - KOMOOT_PASSWORD=${KOMOOT_PASSWORD}
+      - ORS_API_KEY=${ORS_API_KEY}
+      - KOMOOT_RATE_LIMIT=2
+    networks:
+      backends:
+        aliases:
+          - komoot-backend
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3007/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  backends:
+    external: true
+    name: ${BACKEND_NETWORK:-mcp-hub-backends}
