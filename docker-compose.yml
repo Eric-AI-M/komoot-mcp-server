@@ -3,11 +3,10 @@ services:
     build: .
     container_name: mcp-komoot
     restart: unless-stopped
+    env_file: .env
     environment:
-      - KOMOOT_EMAIL=${KOMOOT_EMAIL}
-      - KOMOOT_PASSWORD=${KOMOOT_PASSWORD}
-      - ORS_API_KEY=${ORS_API_KEY}
-      - KOMOOT_RATE_LIMIT=2
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3007
     networks:
       backends:
         aliases:
