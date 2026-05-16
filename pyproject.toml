@@ -1,0 +1,23 @@
+[project]
+name = "komoot-mcp-server"
+version = "0.1.0"
+description = "MCP server for Komoot — browse tours, download GPX, plan routes with AI assistance"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+    "kompy>=0.0.12",
+    "openrouteservice>=2.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "vcrpy>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
