@@ -86,7 +86,7 @@ Once connected, you can ask Claude things like:
 - "Geocode 'Marienplatz Munich'"
 - "What way types and surfaces does tour 12345 have?"
 
-## Available Tools (16)
+## Available Tools (15)
 
 ### Authentication
 
