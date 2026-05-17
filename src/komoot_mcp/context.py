@@ -21,7 +21,9 @@ from komoot_mcp.auth import AuthManager
 from komoot_mcp.client import KomootClient
 from komoot_mcp.rate_limiter import RateLimiter
 from komoot_mcp.geocoder import Geocoder
-from komoot_mcp.routing import RoutingError, RoutingManager
+# RoutingManager is imported lazily — its only hard dep is the
+# openrouteservice client, which we don't want to require for unit
+# tests that exercise auth/tour tools alone.
 
 
 # Per-request state. Tools must NEVER look at module globals — always
@@ -40,7 +42,7 @@ _client_var: ContextVar[Optional[KomootClient]] = ContextVar(
 _rate_limiter: RateLimiter | None = None
 _geocoder: Geocoder | None = None
 _routing_manager_resolved = False
-_routing_manager: RoutingManager | None = None
+_routing_manager = None  # type: ignore[var-annotated]
 
 
 def get_rate_limiter() -> RateLimiter:
@@ -57,12 +59,17 @@ def get_geocoder() -> Geocoder:
     return _geocoder
 
 
-def get_routing_manager() -> RoutingManager | None:
+def get_routing_manager():
     global _routing_manager_resolved, _routing_manager
     if not _routing_manager_resolved:
         try:
-            _routing_manager = RoutingManager()
-        except RoutingError:
+            # Lazy import — see top of file.
+            from komoot_mcp.routing import RoutingError, RoutingManager
+            try:
+                _routing_manager = RoutingManager()
+            except RoutingError:
+                _routing_manager = None
+        except ImportError:
             _routing_manager = None
         _routing_manager_resolved = True
     return _routing_manager
