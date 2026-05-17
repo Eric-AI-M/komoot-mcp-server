@@ -4,10 +4,12 @@ Two concerns:
 
 1. **Internal-secret auth.** When ``INTERNAL_SECRET`` is set in the
    environment, every incoming request (except ``/health``) must
-   carry a matching ``X-Internal-Secret`` header. This stops random
-   internet traffic from reaching the MCP endpoint when it's exposed
-   behind the platform gateway. When ``INTERNAL_SECRET`` is unset
-   (local dev) the check is skipped.
+   carry a matching ``Authorization: Bearer <secret>`` header. This
+   stops random internet traffic from reaching the MCP endpoint when
+   it's exposed behind the platform gateway. When ``INTERNAL_SECRET``
+   is unset (local dev) the check is skipped. The exact wire format
+   matches the Bitrix reference server so the gateway can use a single
+   code path for all backends.
 
 2. **Per-tenant credentials.** The gateway forwards the calling user's
    Komoot creds as JSON in ``x-user-credentials``:
@@ -41,7 +43,8 @@ from komoot_mcp.context import (
 logger = logging.getLogger(__name__)
 
 
-INTERNAL_SECRET_HEADER = "x-internal-secret"
+INTERNAL_SECRET_HEADER = "authorization"
+BEARER_PREFIX = "Bearer "
 USER_CREDENTIALS_HEADER = "x-user-credentials"
 HEALTH_PATH = "/health"
 
@@ -64,15 +67,15 @@ class InternalSecretMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Header names are case-insensitive (HTTP/1.1 RFC 7230 §3.2); lowercase
+        # them for lookup. The value, however, must match the Bearer prefix
+        # case-sensitively to mirror the Bitrix reference (`auth !== \`Bearer ${secret}\``).
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         provided = headers.get(INTERNAL_SECRET_HEADER)
-        if provided != self.secret:
+        expected = f"{BEARER_PREFIX}{self.secret}"
+        if provided != expected:
             response = JSONResponse(
-                {
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32000, "message": "Unauthorized — internal requests only"},
-                    "id": None,
-                },
+                {"error": "unauthorized"},
                 status_code=401,
             )
             await response(scope, receive, send)

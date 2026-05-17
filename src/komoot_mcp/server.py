@@ -5,8 +5,8 @@ Runs as either:
 * **stdio** for local single-user use (creds via env vars).
 * **streamable-HTTP** behind the Eric AI platform gateway. The gateway
   forwards per-user creds via the ``x-user-credentials`` header and a
-  shared ``X-Internal-Secret`` token. See ``middleware.py`` for the
-  wire format.
+  shared ``Authorization: Bearer <INTERNAL_SECRET>`` token. See
+  ``middleware.py`` for the wire format.
 """
 
 import sys

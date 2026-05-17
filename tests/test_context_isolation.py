@@ -216,7 +216,7 @@ class TestInternalSecretMiddleware:
         scope = {
             "type": "http",
             "path": "/mcp",
-            "headers": [(b"x-internal-secret", b"wrong")],
+            "headers": [(b"authorization", b"Bearer wrong")],
         }
 
         captured: list[dict] = []
@@ -229,6 +229,91 @@ class TestInternalSecretMiddleware:
         assert called == []  # downstream never invoked
         # First message is response.start with 401.
         assert captured[0]["status"] == 401
+        # Body should be the canonical {"error": "unauthorized"} payload.
+        body_msg = captured[1]
+        assert b'"error":"unauthorized"' in body_msg["body"].replace(b" ", b"")
+
+    @pytest.mark.asyncio
+    async def test_rejects_when_header_missing(self, monkeypatch):
+        monkeypatch.setenv("INTERNAL_SECRET", "topsecret")
+        import importlib
+        import komoot_mcp.middleware as mod
+        importlib.reload(mod)
+
+        called = []
+        async def downstream(scope, receive, send):
+            called.append(True)
+
+        mw = mod.InternalSecretMiddleware(downstream)
+        scope = {"type": "http", "path": "/mcp", "headers": []}
+
+        captured: list[dict] = []
+        async def receive():
+            return {"type": "http.request", "body": b""}
+        async def send(msg):
+            captured.append(msg)
+
+        await mw(scope, receive, send)
+        assert called == []
+        assert captured[0]["status"] == 401
+
+    @pytest.mark.asyncio
+    async def test_rejects_wrong_prefix(self, monkeypatch):
+        # Bare token (no "Bearer ") must be rejected — gateway is required
+        # to send the exact Authorization: Bearer <secret> form.
+        monkeypatch.setenv("INTERNAL_SECRET", "topsecret")
+        import importlib
+        import komoot_mcp.middleware as mod
+        importlib.reload(mod)
+
+        called = []
+        async def downstream(scope, receive, send):
+            called.append(True)
+
+        mw = mod.InternalSecretMiddleware(downstream)
+        scope = {
+            "type": "http",
+            "path": "/mcp",
+            "headers": [(b"authorization", b"topsecret")],
+        }
+
+        captured: list[dict] = []
+        async def receive():
+            return {"type": "http.request", "body": b""}
+        async def send(msg):
+            captured.append(msg)
+
+        await mw(scope, receive, send)
+        assert called == []
+        assert captured[0]["status"] == 401
+
+    @pytest.mark.asyncio
+    async def test_accepts_correct_bearer(self, monkeypatch):
+        monkeypatch.setenv("INTERNAL_SECRET", "topsecret")
+        import importlib
+        import komoot_mcp.middleware as mod
+        importlib.reload(mod)
+
+        called = []
+        async def downstream(scope, receive, send):
+            called.append(True)
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        mw = mod.InternalSecretMiddleware(downstream)
+        scope = {
+            "type": "http",
+            "path": "/mcp",
+            "headers": [(b"authorization", b"Bearer topsecret")],
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": b""}
+        async def send(msg):
+            pass
+
+        await mw(scope, receive, send)
+        assert called == [True]
 
     @pytest.mark.asyncio
     async def test_health_bypasses_secret_check(self, monkeypatch):
