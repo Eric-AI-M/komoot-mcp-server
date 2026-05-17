@@ -1,6 +1,6 @@
 """Browse and search tools for Komoot MCP server."""
 
-client = None  # Set by server.py
+from komoot_mcp.context import get_client
 
 
 def register(mcp):
@@ -26,7 +26,7 @@ def register(mcp):
             sort_direction: Sort order ('asc' or 'desc')
         """
         try:
-            result = client.list_tours(
+            result = await get_client().list_tours(
                 page=page, limit=limit, sport_type=sport_type,
                 status=status, name=name, sort_field=sort_field,
                 sort_direction=sort_direction,
@@ -55,7 +55,7 @@ def register(mcp):
             tour_id: The numeric tour ID
         """
         try:
-            tour = client.get_tour(tour_id)
+            tour = await get_client().get_tour(tour_id)
             lines = [f"Tour: {tour.get('name', 'unnamed')}"]
             for key in [
                 'id', 'sport', 'status', 'distance', 'elevation_up', 'elevation_down',
@@ -73,7 +73,7 @@ def register(mcp):
     async def komoot_get_user_profile() -> str:
         """Get your Komoot user profile information."""
         try:
-            profile = client.get_user_profile()
+            profile = await get_client().get_user_profile()
             if isinstance(profile, dict):
                 return f"Profile: {profile.get('displayname', 'unknown')} | User ID: {profile.get('username', '?')}"
             return str(profile)

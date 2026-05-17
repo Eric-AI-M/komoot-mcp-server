@@ -24,7 +24,10 @@ class RoutingManager:
         if prefer_trails:
             avoid_features.append("highways")
         if avoid_roads:
-            avoid_features.extend(["highways", "secondary"])
+            # ORS only accepts a fixed enum for avoid_features. "secondary"
+            # is not in the spec — adding it makes the API reject the
+            # whole request with HTTP 400.
+            avoid_features.append("highways")
         options = {}
         if avoid_features:
             options["avoid_features"] = list(set(avoid_features))

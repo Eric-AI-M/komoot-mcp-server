@@ -1,6 +1,29 @@
 """Tour data tools for Komoot MCP server."""
 
-client = None  # Set by server.py
+import os
+import tempfile
+
+from komoot_mcp.context import get_client
+
+
+def _default_gpx_path(tour_id: int) -> str:
+    """Pick a writable GPX target inside ``KOMOOT_DATA_DIR``.
+
+    Hard-coded ``./tour_{id}.gpx`` failed under the container (CWD
+    ``/app`` is owned by root and the process runs as ``nobody``).
+    Use a tempfile path under the configured data dir instead.
+    """
+    data_dir = os.environ.get("KOMOOT_DATA_DIR", "/tmp/komoot")
+    os.makedirs(data_dir, exist_ok=True)
+    fd = tempfile.NamedTemporaryFile(
+        delete=False,
+        prefix=f"tour_{tour_id}_",
+        suffix=".gpx",
+        dir=data_dir,
+    )
+    path = fd.name
+    fd.close()
+    return path
 
 
 def register(mcp):
@@ -12,7 +35,7 @@ def register(mcp):
             tour_id: The numeric tour ID
         """
         try:
-            coords = client.get_tour_coordinates(tour_id)
+            coords = await get_client().get_tour_coordinates(tour_id)
             if not coords:
                 return "No coordinates found."
             lines = [f"Tour {tour_id}: {len(coords)} coordinate points"]
@@ -34,37 +57,22 @@ def register(mcp):
 
         Args:
             tour_id: The numeric tour ID
-            filepath: Path to save the GPX file. If not provided, saves to ./tour_{tour_id}.gpx
+            filepath: Path to save the GPX file. If not provided, saves to
+                a tempfile in ``KOMOOT_DATA_DIR`` (default ``/tmp/komoot``).
         """
         try:
             if filepath is None:
-                filepath = f"tour_{tour_id}.gpx"
-            result = client.get_tour_gpx(tour_id, filepath)
+                filepath = _default_gpx_path(tour_id)
+            result = await get_client().get_tour_gpx(tour_id, filepath)
             return f"GPX saved to: {result}"
         except Exception as e:
             return f"Error downloading GPX: {e}"
 
     @mcp.tool()
-    async def komoot_get_tour_fit(tour_id: int, filepath: str = None) -> str:
-        """Download a tour as a FIT file (Garmin format).
-
-        Args:
-            tour_id: The numeric tour ID
-            filepath: Path to save the FIT file. If not provided, saves to ./tour_{tour_id}.fit
-        """
-        try:
-            if filepath is None:
-                filepath = f"tour_{tour_id}.fit"
-            result = client.get_tour_fit(tour_id, filepath)
-            return f"FIT file saved to: {result}"
-        except Exception as e:
-            return f"Error downloading FIT: {e}"
-
-    @mcp.tool()
     async def komoot_get_tour_directions(tour_id: int) -> str:
         """Get turn-by-turn directions for a tour."""
         try:
-            directions = client.get_tour_directions(tour_id)
+            directions = await get_client().get_tour_directions(tour_id)
             if not directions:
                 return "No directions found."
             lines = [f"Tour {tour_id} directions:"]
@@ -83,7 +91,7 @@ def register(mcp):
     async def komoot_get_tour_way_types(tour_id: int) -> str:
         """Get the way type breakdown for a tour (road, trail, path percentages)."""
         try:
-            way_types = client.get_tour_way_types(tour_id)
+            way_types = await get_client().get_tour_way_types(tour_id)
             if not way_types:
                 return "No way type data found."
             if isinstance(way_types, list):
@@ -96,7 +104,7 @@ def register(mcp):
     async def komoot_get_tour_surfaces(tour_id: int) -> str:
         """Get the surface breakdown for a tour (paved, gravel, trail percentages)."""
         try:
-            surfaces = client.get_tour_surfaces(tour_id)
+            surfaces = await get_client().get_tour_surfaces(tour_id)
             if not surfaces:
                 return "No surface data found."
             if isinstance(surfaces, list):
@@ -109,7 +117,7 @@ def register(mcp):
     async def komoot_get_tour_timeline(tour_id: int) -> str:
         """Get the event timeline for a tour."""
         try:
-            timeline = client.get_tour_timeline(tour_id)
+            timeline = await get_client().get_tour_timeline(tour_id)
             if not timeline:
                 return "No timeline events found."
             lines = [f"Tour {tour_id} timeline:"]
