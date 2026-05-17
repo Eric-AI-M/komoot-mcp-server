@@ -1,7 +1,24 @@
 """Routing tools for Komoot MCP server."""
 
-geocoder = None   # Set by server.py
-routing = None    # Set by server.py
+import os
+import tempfile
+
+from komoot_mcp.context import get_geocoder, get_routing_manager
+
+
+def _default_route_gpx_path(sport: str) -> str:
+    """Pick a writable GPX target for a planned route."""
+    data_dir = os.environ.get("KOMOOT_DATA_DIR", "/tmp/komoot")
+    os.makedirs(data_dir, exist_ok=True)
+    fd = tempfile.NamedTemporaryFile(
+        delete=False,
+        prefix=f"planned_route_{sport}_",
+        suffix=".gpx",
+        dir=data_dir,
+    )
+    path = fd.name
+    fd.close()
+    return path
 
 
 def register(mcp):
@@ -14,6 +31,7 @@ def register(mcp):
             limit: Max number of results (default 5)
         """
         try:
+            geocoder = get_geocoder()
             parts = query.split(",")
             if len(parts) == 2:
                 try:
@@ -69,17 +87,19 @@ def register(mcp):
             avoid_roads: If True, minimize paved roads
             waypoints: Comma-separated coordinates e.g. "52.5,13.4|52.6,13.5"
         """
+        routing = get_routing_manager()
         if routing is None:
             return "Route planning is not available. Set ORS_API_KEY environment variable."
 
         try:
-            start_coords = _parse_location(start)
+            geocoder = get_geocoder()
+            start_coords = _parse_location(start, geocoder)
             if not start_coords:
                 return f"Could not geocode start location: {start}"
 
             end_coords = None
             if end:
-                end_coords = _parse_location(end)
+                end_coords = _parse_location(end, geocoder)
                 if not end_coords:
                     return f"Could not geocode end location: {end}"
 
@@ -102,7 +122,7 @@ def register(mcp):
                 waypoints=waypoint_coords,
             )
 
-            gpx_path = f"planned_route_{sport}.gpx"
+            gpx_path = _default_route_gpx_path(sport)
             with open(gpx_path, "w") as f:
                 f.write(result["gpx"])
 
@@ -120,7 +140,7 @@ def register(mcp):
             return f"Route planning failed: {e}"
 
 
-def _parse_location(s: str):
+def _parse_location(s: str, geocoder):
     coords = _parse_coords(s)
     if coords:
         return coords

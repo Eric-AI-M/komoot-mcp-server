@@ -1,4 +1,13 @@
-"""Komoot MCP Server — browse, download, upload, and plan routes."""
+"""Komoot MCP Server — browse, download, upload, and plan routes.
+
+Runs as either:
+
+* **stdio** for local single-user use (creds via env vars).
+* **streamable-HTTP** behind the Eric AI platform gateway. The gateway
+  forwards per-user creds via the ``x-user-credentials`` header and a
+  shared ``Authorization: Bearer <INTERNAL_SECRET>`` token. See
+  ``middleware.py`` for the wire format.
+"""
 
 import sys
 import os
@@ -8,12 +17,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from mcp.server import FastMCP
-
-from komoot_mcp.auth import AuthManager
-from komoot_mcp.rate_limiter import RateLimiter
-from komoot_mcp.client import KomootClient
-from komoot_mcp.geocoder import Geocoder
-from komoot_mcp.routing import RoutingManager, RoutingError
 
 from komoot_mcp.tools import (
     auth_tools,
@@ -25,7 +28,13 @@ from komoot_mcp.tools import (
 
 
 def create_server(host="127.0.0.1", port=8000):
-    """Create and configure the MCP server with all tools registered."""
+    """Create and configure the MCP server with all tools registered.
+
+    All per-tenant state (AuthManager, KomootClient) lives in a
+    ContextVar, populated per-request by the Starlette middleware.
+    Tools resolve dependencies via :mod:`komoot_mcp.context` — there
+    is no module-level shared state.
+    """
     mcp = FastMCP(
         "Komoot MCP Server",
         host=host,
@@ -38,26 +47,8 @@ def create_server(host="127.0.0.1", port=8000):
     async def health_check(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
-    # Initialize components
-    auth_manager = AuthManager()
-    rate_limiter = RateLimiter()
-    komoot_client = KomootClient(auth_manager, rate_limiter)
-    geocoder = Geocoder()
-
-    try:
-        routing_manager = RoutingManager()
-    except RoutingError:
-        routing_manager = None
-
-    # Wire dependencies into tool modules
-    auth_tools.auth_manager = auth_manager
-    browse_tools.client = komoot_client
-    data_tools.client = komoot_client
-    write_tools.client = komoot_client
-    routing_tools.geocoder = geocoder
-    routing_tools.routing = routing_manager
-
-    # Register all tools
+    # Register all tools. Tools pull their per-request dependencies
+    # from ContextVar at call time, so no wiring step is needed.
     auth_tools.register(mcp)
     browse_tools.register(mcp)
     data_tools.register(mcp)
@@ -65,6 +56,41 @@ def create_server(host="127.0.0.1", port=8000):
     routing_tools.register(mcp)
 
     return mcp
+
+
+def _run_http(mcp: FastMCP) -> None:
+    """Mount middleware and serve via uvicorn.
+
+    ``FastMCP.run(transport='streamable-http')`` builds its own
+    Starlette app internally, leaving no seam to install middleware.
+    We replicate the small bit of glue here so we can wrap the app in
+    the platform-integration middleware stack.
+    """
+    import asyncio
+    import uvicorn
+
+    # Import locally so unit tests that don't need HTTP can skip these.
+    from komoot_mcp.middleware import (
+        InternalSecretMiddleware,
+        UserCredentialsMiddleware,
+    )
+
+    app = mcp.streamable_http_app()
+
+    # Order matters — outer middleware runs first. We want the secret
+    # check to gate everything (including credential parsing), so it
+    # goes on last (Starlette wraps outermost-last).
+    app.add_middleware(UserCredentialsMiddleware)
+    app.add_middleware(InternalSecretMiddleware)
+
+    config = uvicorn.Config(
+        app,
+        host=mcp.settings.host,
+        port=mcp.settings.port,
+        log_level=mcp.settings.log_level.lower(),
+    )
+    server = uvicorn.Server(config)
+    asyncio.run(server.serve())
 
 
 def main():
@@ -79,7 +105,7 @@ def main():
     mcp = create_server(host=args.host, port=args.port)
 
     if args.transport == "http":
-        mcp.run(transport="streamable-http")
+        _run_http(mcp)
     else:
         mcp.run()
 

@@ -1,14 +1,24 @@
+"""AuthManager — per-instance Komoot credential holder.
+
+Multi-tenant safe: each request gets its own AuthManager instance via
+the ContextVar machinery in ``komoot_mcp.context``. Falls back to env
+vars only when constructed with no explicit credentials (local stdio /
+dev mode).
+"""
 import os
 import base64
 import requests
 
+
 class AuthError(Exception):
     pass
 
+
 class AuthManager:
-    def __init__(self):
-        self.email = os.environ.get("KOMOOT_EMAIL")
-        self.password = os.environ.get("KOMOOT_PASSWORD")
+    def __init__(self, email: str | None = None, password: str | None = None):
+        # Explicit credentials win; otherwise fall back to env for stdio/dev.
+        self.email = email if email is not None else os.environ.get("KOMOOT_EMAIL")
+        self.password = password if password is not None else os.environ.get("KOMOOT_PASSWORD")
         self.user_id = None
         self.token = None
 

@@ -1,4 +1,21 @@
+"""Thin async wrapper around the ``kompy`` Komoot SDK.
+
+NOTE — RELIANCE ON KOMPY INTERNALS:
+The ``get_tour_directions``, ``get_tour_way_types``, ``get_tour_surfaces``
+and ``get_tour_timeline`` helpers below call private ``Tour._create_*``
+methods. These are not part of the kompy public API and may break in
+future versions, so we pin ``kompy<0.1.0`` in ``pyproject.toml``.
+
+NOTE — ASYNC SHAPE:
+All API methods are coroutines. They wrap synchronous kompy calls in
+``asyncio.to_thread`` so the event loop is never blocked by blocking
+HTTP. Rate limiting is awaited prior to each call.
+"""
+from __future__ import annotations
+
+import asyncio
 import os
+
 import kompy
 
 
@@ -24,10 +41,10 @@ class KomootClient:
             self._api = kompy.KomootConnector(email, password)
         return self._api
 
-    def _call(self, fn, *args, **kwargs):
-        self.rl.acquire()
+    async def _call(self, fn, *args, **kwargs):
+        await self.rl.acquire()
         try:
-            return fn(*args, **kwargs)
+            return await asyncio.to_thread(fn, *args, **kwargs)
         except Exception as e:
             msg = str(e)
             if "401" in msg or "403" in msg:
@@ -44,21 +61,20 @@ class KomootClient:
                 )
             raise KomootAPIError(f"Komoot API error: {msg}")
 
-    def get_user_profile(self):
-        api = self._get_api()
-        # kompy Authentication is companion to KomootConnector
-        try:
-            auth_obj = kompy.Authentication(
-                self.auth.email, self.auth.password
-            )
-            return {
-                "username": auth_obj.get_username(),
-                "email": auth_obj.get_email_address(),
-            }
-        except Exception:
-            return {"email": self.auth.email}
+    async def get_user_profile(self):
+        # Surfaces kompy errors so handlers can surface them; the
+        # previous silent fallback masked auth/network failures and
+        # made debugging painful.
+        self._get_api()  # validates credentials are present
+        auth_obj = await asyncio.to_thread(
+            kompy.Authentication, self.auth.email, self.auth.password
+        )
+        return {
+            "username": await asyncio.to_thread(auth_obj.get_username),
+            "email": await asyncio.to_thread(auth_obj.get_email_address),
+        }
 
-    def list_tours(
+    async def list_tours(
         self,
         page=0,
         limit=50,
@@ -87,7 +103,7 @@ class KomootClient:
         if end_date:
             kwargs["end_date"] = end_date
 
-        tours = self._call(api.get_tours, **kwargs)
+        tours = await self._call(api.get_tours, **kwargs)
         return {
             "tours": [self._tour_to_dict(t) for t in tours],
             "page": {"page": page, "limit": limit},
@@ -110,81 +126,75 @@ class KomootClient:
                 d[key] = val
         return d
 
-    def get_tour(self, tour_id):
+    async def get_tour(self, tour_id):
         api = self._get_api()
-        tour = self._call(api.get_tour_by_id, str(tour_id))
+        tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
             return self._tour_to_dict(tour)
         # If it returned a non-Tour result (GPX/Fit), wrap it
         return {"id": tour_id, "raw": str(type(tour))}
 
-    def get_tour_coordinates(self, tour_id):
+    async def get_tour_coordinates(self, tour_id):
         api = self._get_api()
-        tour = self._call(api.get_tour_by_id, str(tour_id))
+        tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            coords = tour.generate_coordinates()
+            coords = await asyncio.to_thread(tour.generate_coordinates)
             return coords if coords else []
         return []
 
-    def get_tour_gpx(self, tour_id, filepath=None):
+    async def get_tour_gpx(self, tour_id, filepath=None):
         api = self._get_api()
-        tour = self._call(api.get_tour_by_id, str(tour_id))
+        tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            gpx_data = tour.generate_gpx_track()
+            gpx_data = await asyncio.to_thread(tour.generate_gpx_track)
             if gpx_data is None:
                 raise KomootAPIError("Failed to generate GPX")
             gpx_str = gpx_data.to_xml() if hasattr(gpx_data, "to_xml") else str(gpx_data)
             if filepath:
+                # Filesystem I/O is small; keep it inline for simplicity.
                 with open(filepath, "w") as f:
                     f.write(gpx_str)
                 return filepath
             return gpx_str
         raise KomootAPIError("Could not retrieve tour as GPX")
 
-    def get_tour_fit(self, tour_id, filepath=None):
+    async def get_tour_directions(self, tour_id):
         api = self._get_api()
-        tour = self._call(api.get_tour_by_id, str(tour_id))
+        tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            coords = tour.generate_coordinates()
-            if not coords:
-                raise KomootAPIError("No coordinates available")
-            # FIT export not directly supported by kompy; return coordinates as minimal fallback
-            return {"coordinates": coords, "note": "FIT export not supported via kompy"}
-        raise KomootAPIError("Could not retrieve tour data")
-
-    def get_tour_directions(self, tour_id):
-        api = self._get_api()
-        tour = self._call(api.get_tour_by_id, str(tour_id))
-        if isinstance(tour, kompy.Tour):
-            segments = tour._create_list_segments()
+            # Relies on kompy internal — see module docstring.
+            segments = await asyncio.to_thread(tour._create_list_segments)
             return segments if segments else []
         return []
 
-    def get_tour_way_types(self, tour_id):
+    async def get_tour_way_types(self, tour_id):
         api = self._get_api()
-        tour = self._call(api.get_tour_by_id, str(tour_id))
+        tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            waypoints = tour._create_list_waypoints()
+            # Relies on kompy internal — see module docstring.
+            waypoints = await asyncio.to_thread(tour._create_list_waypoints)
             return waypoints if waypoints else []
         return []
 
-    def get_tour_surfaces(self, tour_id):
+    async def get_tour_surfaces(self, tour_id):
         api = self._get_api()
-        tour = self._call(api.get_tour_by_id, str(tour_id))
+        tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            info = tour._create_tour_information()
+            # Relies on kompy internal — see module docstring.
+            info = await asyncio.to_thread(tour._create_tour_information)
             return info if info else {}
         return {}
 
-    def get_tour_timeline(self, tour_id):
+    async def get_tour_timeline(self, tour_id):
         api = self._get_api()
-        tour = self._call(api.get_tour_by_id, str(tour_id))
+        tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            summary = tour._create_tour_summary()
+            # Relies on kompy internal — see module docstring.
+            summary = await asyncio.to_thread(tour._create_tour_summary)
             return summary if summary else {}
         return {}
 
-    def upload_tour(self, filepath, data_type=None):
+    async def upload_tour(self, filepath, data_type=None, sport="touringbicycle"):
         import gpxpy
 
         api = self._get_api()
@@ -202,26 +212,26 @@ class KomootClient:
                 tour_obj = gpxpy.parse(f)
             # Extract name from filename
             tour_name = os.path.splitext(os.path.basename(filepath))[0]
-            return self._call(
+            return await self._call(
                 api.upload_tour,
                 tour_object=tour_obj,
-                activity_type="touringbicycle",
+                activity_type=sport,
                 tour_name=tour_name,
             )
         else:
             with open(filepath, "rb") as f:
                 tour_obj = f.read()
             tour_name = os.path.splitext(os.path.basename(filepath))[0]
-            return self._call(
+            return await self._call(
                 api.upload_tour,
                 tour_object=tour_obj,
-                activity_type="touringbicycle",
+                activity_type=sport,
                 tour_name=tour_name,
             )
 
-    def modify_tour(self, tour_id, name=None, sport=None, status=None):
+    async def modify_tour(self, tour_id, name=None, sport=None, status=None):
         api = self._get_api()
-        return self._call(
+        return await self._call(
             api.change_tour,
             tour_id=int(tour_id),
             tour_name=name,
@@ -229,6 +239,6 @@ class KomootClient:
             status=status,
         )
 
-    def delete_tour(self, tour_id):
+    async def delete_tour(self, tour_id):
         api = self._get_api()
-        return self._call(api.delete_tour, tour_id=int(tour_id))
+        return await self._call(api.delete_tour, tour_id=int(tour_id))
