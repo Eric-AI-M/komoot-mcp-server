@@ -225,3 +225,34 @@ class TestGetTourWayTypes:
         assert result == []
 
 
+class TestGetTourGpxInline:
+    """Issue #9: the GPX must be returned inline as a string, never
+    written to the server's filesystem.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_gpx_string_without_writing_disk(self, client, tmp_path, monkeypatch):
+        tour = _make_tour_stub()
+
+        gpx_obj = type("G", (), {"to_xml": lambda self: "<gpx>inline</gpx>"})()
+
+        def fake_generate(authentication):
+            tour.gpx_track = gpx_obj
+            return True
+
+        _install_api_stub(client, tour, generate_gpx=fake_generate)
+
+        # Sentinel: blow up if anything tries to ``open()`` for writing.
+        real_open = open
+
+        def guarded_open(path, mode="r", *args, **kwargs):
+            if "w" in mode or "a" in mode or "x" in mode:
+                raise AssertionError(
+                    f"GPX path must not write to disk; got open({path!r}, {mode!r})"
+                )
+            return real_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", guarded_open)
+
+        out = await client.get_tour_gpx(42)
+        assert out == "<gpx>inline</gpx>"

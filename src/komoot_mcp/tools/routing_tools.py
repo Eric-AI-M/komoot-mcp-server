@@ -1,24 +1,7 @@
 """Routing tools for Komoot MCP server."""
 
-import os
-import tempfile
-
 from komoot_mcp.context import get_geocoder, get_routing_manager
-
-
-def _default_route_gpx_path(sport: str) -> str:
-    """Pick a writable GPX target for a planned route."""
-    data_dir = os.environ.get("KOMOOT_DATA_DIR", "/tmp/komoot")
-    os.makedirs(data_dir, exist_ok=True)
-    fd = tempfile.NamedTemporaryFile(
-        delete=False,
-        prefix=f"planned_route_{sport}_",
-        suffix=".gpx",
-        dir=data_dir,
-    )
-    path = fd.name
-    fd.close()
-    return path
+from komoot_mcp.tools.data_tools import _format_gpx_response
 
 
 def register(mcp):
@@ -126,20 +109,21 @@ def register(mcp):
                 waypoints=waypoint_coords,
             )
 
-            gpx_path = _default_route_gpx_path(sport)
-            with open(gpx_path, "w") as f:
-                f.write(result["gpx"])
-
-            return (
+            # Issue #9: GPX content is returned inline so the caller can
+            # use it directly. Server-side filesystem paths are useless
+            # under the multi-tenant gateway.
+            summary = (
                 f"Route planned successfully!\n"
                 f"  Distance: {result['distance_km']} km\n"
                 f"  Elevation gain: {result['elevation_gain_m']} m\n"
                 f"  Estimated duration: {result['duration_minutes']} min\n"
-                f"  GPX saved to: {gpx_path}\n"
                 f"  Sport profile: {sport}\n"
                 f"  Waypoints: {len(result['waypoints'])} points\n\n"
-                f"Upload this route to Komoot with: komoot_upload_tour('{gpx_path}')"
             )
+            gpx_block = _format_gpx_response(
+                f"planned {sport} route", result["gpx"],
+            )
+            return summary + gpx_block
         except Exception as e:
             return f"Route planning failed: {e}"
 

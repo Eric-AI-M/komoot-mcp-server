@@ -180,16 +180,20 @@ class KomootClient:
             return tour.coordinates or []
         return []
 
-    async def get_tour_gpx(self, tour_id, filepath=None):
+    async def get_tour_gpx(self, tour_id):
+        """Return the GPX XML for a tour as an in-memory string.
+
+        kompy's ``Tour.generate_gpx_track(authentication)`` populates
+        ``tour.gpx_track`` in memory (the call returns True/False). We
+        return that string directly — see issue #9: writing the GPX to a
+        path on the MCP server's filesystem (formerly ``KOMOOT_DATA_DIR``)
+        was useless in the multi-tenant gateway deployment, because the
+        caller has no access to the server's disk. ``KOMOOT_DATA_DIR``
+        is now vestigial.
+        """
         api = self._get_api()
         tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            # kompy's Tour.generate_gpx_track requires the Authentication
-            # object — the connector populates ``api.authentication`` post-
-            # login. Previously we called it with no args, which raised
-            # ``missing 1 required positional argument: 'authentication'``.
-            # The call mutates ``tour.gpx_track`` and returns True/False;
-            # we read the GPX object off the tour after the call.
             await asyncio.to_thread(
                 tour.generate_gpx_track, api.authentication,
             )
@@ -197,11 +201,6 @@ class KomootClient:
             if gpx_data is None:
                 raise KomootAPIError("Failed to generate GPX")
             gpx_str = gpx_data.to_xml() if hasattr(gpx_data, "to_xml") else str(gpx_data)
-            if filepath:
-                # Filesystem I/O is small; keep it inline for simplicity.
-                with open(filepath, "w") as f:
-                    f.write(gpx_str)
-                return filepath
             return gpx_str
         raise KomootAPIError("Could not retrieve tour as GPX")
 
