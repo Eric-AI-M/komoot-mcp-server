@@ -355,10 +355,75 @@ class KomootClient:
             return events
         return []
 
-    async def upload_tour(self, filepath, data_type=None, sport="touringbicycle"):
+    async def upload_tour(
+        self,
+        filepath=None,
+        data_type=None,
+        sport="touringbicycle",
+        gpx_content=None,
+        tour_name=None,
+    ):
+        """Upload a GPX/FIT/TCX tour to Komoot.
+
+        Accepts either the GPX content inline (``gpx_content``) or a
+        ``filepath`` on the server's filesystem. ``gpx_content`` takes
+        precedence — that's the only mode that works under the
+        multi-tenant gateway, where the MCP server can't read the
+        caller's disk (mirrors the fix shape from issue #9 / PR #12 for
+        GPX downloads and route planning).
+
+        For non-GPX uploads (FIT/TCX) the legacy ``filepath`` path is
+        still required because those are binary formats.
+
+        Raises ``KomootAPIError`` if neither ``gpx_content`` nor
+        ``filepath`` is supplied, or if ``filepath`` doesn't exist (the
+        error message points at ``gpx_content`` for the gateway case).
+        """
         import gpxpy
 
         api = self._get_api()
+
+        # --- gpx_content path (preferred under the gateway) ---
+        # gpx_content is GPX XML as a string. We parse it directly —
+        # no disk I/O, no temp file. kompy expects a gpxpy.gpx.GPX
+        # object for GPX uploads. ``data_type`` defaults to "gpx" in
+        # this branch; explicitly passing FIT/TCX with inline content
+        # isn't supported because those are binary formats.
+        if gpx_content is not None:
+            if data_type is None:
+                data_type = "gpx"
+            if data_type != "gpx":
+                raise KomootAPIError(
+                    "gpx_content is only supported for GPX uploads. "
+                    "For FIT/TCX, use filepath (only works in stdio/"
+                    "local-dev mode)."
+                )
+            tour_obj = gpxpy.parse(gpx_content)
+            name = tour_name or self._extract_gpx_name(tour_obj) or "tour"
+            return await self._call(
+                api.upload_tour,
+                tour_object=tour_obj,
+                activity_type=sport,
+                tour_name=name,
+            )
+
+        # --- filepath path (stdio / local-dev backward compat) ---
+        if filepath is None:
+            raise KomootAPIError(
+                "Either gpx_content (GPX XML as a string) or filepath "
+                "(path readable by the MCP server) must be provided. "
+                "Under the multi-tenant gateway, the server cannot "
+                "read your local filesystem — pass gpx_content."
+            )
+
+        if not os.path.exists(filepath):
+            raise KomootAPIError(
+                f"File not found at {filepath}. If you're calling via "
+                f"the gateway, pass gpx_content (the GPX XML as a "
+                f"string) instead — the server can't read your local "
+                f"filesystem."
+            )
+
         if data_type is None:
             ext = os.path.splitext(filepath)[1].lower().lstrip(".")
             if ext in ("gpx", "fit", "tcx"):
@@ -368,27 +433,47 @@ class KomootClient:
                     f"Cannot determine tour type from extension: {ext}"
                 )
 
+        name = tour_name or os.path.splitext(os.path.basename(filepath))[0]
+
         if data_type == "gpx":
             with open(filepath, "r") as f:
                 tour_obj = gpxpy.parse(f)
-            # Extract name from filename
-            tour_name = os.path.splitext(os.path.basename(filepath))[0]
             return await self._call(
                 api.upload_tour,
                 tour_object=tour_obj,
                 activity_type=sport,
-                tour_name=tour_name,
+                tour_name=name,
             )
         else:
             with open(filepath, "rb") as f:
                 tour_obj = f.read()
-            tour_name = os.path.splitext(os.path.basename(filepath))[0]
             return await self._call(
                 api.upload_tour,
                 tour_object=tour_obj,
                 activity_type=sport,
-                tour_name=tour_name,
+                tour_name=name,
             )
+
+    @staticmethod
+    def _extract_gpx_name(gpx_obj):
+        """Best-effort: pull the first track's name from a parsed GPX.
+
+        gpxpy.gpx.GPX exposes a top-level ``name`` and a list of tracks
+        each with their own ``name``. We prefer the GPX-level name, fall
+        back to the first track. Returns None if neither is present.
+        """
+        try:
+            top = getattr(gpx_obj, "name", None)
+            if top:
+                return top
+            tracks = getattr(gpx_obj, "tracks", None) or []
+            for t in tracks:
+                tn = getattr(t, "name", None)
+                if tn:
+                    return tn
+        except Exception:
+            pass
+        return None
 
     async def modify_tour(self, tour_id, name=None, sport=None, status=None):
         api = self._get_api()
