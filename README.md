@@ -50,12 +50,12 @@ Run the server with `--transport http`. The gateway injects credentials per-requ
 
 | Header | Purpose |
 |---|---|
-| `X-User-Credentials` | JSON object `{"email": "user@example.com", "password": "..."}`. Parsed per request, used to build a request-scoped `AuthManager`, and discarded when the response is sent. |
+| `X-User-Credentials` | JSON object `{"email": "user@example.com", "password": "...", "ors_api_key": "..."}`. Parsed per request, used to build a request-scoped `AuthManager` and (optionally) a per-tenant `RoutingManager`, and discarded when the response is sent. `ors_api_key` is optional — only required if the user wants to call `komoot_plan_route`. |
 | `X-Internal-Secret` | When the `INTERNAL_SECRET` env var is set on the server, every non-`/health` request must include a matching value or be rejected with 401. |
 
-Each request gets its own `AuthManager` + `KomootClient` via `contextvars.ContextVar`, so concurrent users never see each other's credentials.
+Each request gets its own `AuthManager` + `KomootClient` via `contextvars.ContextVar`, so concurrent users never see each other's credentials. The OpenRouteService API key for `komoot_plan_route` flows through the same `X-User-Credentials` JSON payload as a per-org credential — no process-wide ORS key is needed in HTTP mode.
 
-If both an env var and an `X-User-Credentials` header are present, the header wins.
+If both an env var and an `X-User-Credentials` header are present, the header wins. For `ORS_API_KEY` specifically, the env var is only consulted as a fallback when no `ors_api_key` was forwarded for the request (mainly stdio/local-dev).
 
 ## Usage with Claude
 

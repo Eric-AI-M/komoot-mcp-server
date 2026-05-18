@@ -34,15 +34,19 @@ _auth_var: ContextVar[Optional[AuthManager]] = ContextVar(
 _client_var: ContextVar[Optional[KomootClient]] = ContextVar(
     "komoot_client", default=None
 )
+# OpenRouteService API key — per-org credential plumbed via x-user-credentials.
+# Tools that hit ORS (currently komoot_plan_route) MUST read through
+# ``get_ors_api_key`` so two concurrent tenants never share a key.
+_ors_api_key_var: ContextVar[Optional[str]] = ContextVar(
+    "komoot_ors_api_key", default=None
+)
 
 
 # Shared singletons that don't carry tenant identity. Rate limiting is
 # per-process (we throttle the whole server, not per-user). Geocoder
-# and RoutingManager talk to public APIs with no user state.
+# talks to public APIs with no user state.
 _rate_limiter: RateLimiter | None = None
 _geocoder: Geocoder | None = None
-_routing_manager_resolved = False
-_routing_manager = None  # type: ignore[var-annotated]
 
 
 def get_rate_limiter() -> RateLimiter:
@@ -60,19 +64,56 @@ def get_geocoder() -> Geocoder:
 
 
 def get_routing_manager():
-    global _routing_manager_resolved, _routing_manager
-    if not _routing_manager_resolved:
-        try:
-            # Lazy import — see top of file.
-            from komoot_mcp.routing import RoutingError, RoutingManager
-            try:
-                _routing_manager = RoutingManager()
-            except RoutingError:
-                _routing_manager = None
-        except ImportError:
-            _routing_manager = None
-        _routing_manager_resolved = True
-    return _routing_manager
+    """Build a RoutingManager for the current request.
+
+    Reads the ORS API key from the ContextVar (set by middleware from
+    ``x-user-credentials``), falling back to ``ORS_API_KEY`` env var for
+    stdio mode. Returns ``None`` if neither is set or if the
+    ``openrouteservice`` client isn't installed — callers handle the
+    ``None`` case with a user-facing error.
+
+    Built per-request (no caching) because the key is per-tenant. The
+    ``openrouteservice.Client`` is cheap to construct.
+    """
+    try:
+        # Lazy import — see top of file.
+        from komoot_mcp.routing import RoutingError, RoutingManager
+    except ImportError:
+        return None
+
+    api_key = get_ors_api_key()
+    try:
+        return RoutingManager(api_key=api_key)
+    except RoutingError:
+        return None
+
+
+def set_ors_api_key(api_key: str) -> object:
+    """Install an ORS API key for the current context.
+
+    Returns a token for :func:`reset_ors_api_key`. Middleware MUST reset
+    after the request so the key doesn't leak across tenants.
+    """
+    return _ors_api_key_var.set(api_key)
+
+
+def reset_ors_api_key(token: object) -> None:
+    _ors_api_key_var.reset(token)  # type: ignore[arg-type]
+
+
+def get_ors_api_key() -> Optional[str]:
+    """Return the current request's ORS API key.
+
+    Resolution order:
+    1. ContextVar (set by middleware from ``x-user-credentials``).
+    2. ``ORS_API_KEY`` env var (stdio/local-dev fallback).
+
+    Returns ``None`` if neither is set.
+    """
+    key = _ors_api_key_var.get()
+    if key:
+        return key
+    return os.environ.get("ORS_API_KEY") or None
 
 
 def set_auth_manager(auth: AuthManager) -> object:
@@ -114,10 +155,11 @@ def get_client() -> KomootClient:
 
 
 def clear_request_state() -> None:
-    """Reset both auth and client ContextVars to their defaults.
+    """Reset auth/client/ORS ContextVars to their defaults.
 
     Middleware calls this in a ``finally`` block to make absolutely
     sure no tenant state is held by the worker after a response.
     """
     _auth_var.set(None)
     _client_var.set(None)
+    _ors_api_key_var.set(None)

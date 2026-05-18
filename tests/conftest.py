@@ -55,4 +55,39 @@ def _install_kompy_stub_if_missing() -> None:
     sys.modules["kompy"] = stub
 
 
+def _install_openrouteservice_stub_if_missing() -> None:
+    """Install a minimal ``openrouteservice`` stub so RoutingManager can
+    be instantiated in tests without the real ORS dependency.
+
+    The stub records the key it was constructed with so tests can assert
+    that the per-request key was threaded through correctly.
+    """
+    try:
+        import openrouteservice  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+
+    class _StubApiError(Exception):
+        pass
+
+    class _StubClient:
+        def __init__(self, key=None):
+            self.key = key
+
+        def directions(self, **kwargs):  # pragma: no cover - not exercised in unit tests
+            raise NotImplementedError("RoutingManager tests should mock plan_route, not call ORS")
+
+    stub = ModuleType("openrouteservice")
+    stub.Client = _StubClient
+
+    exceptions = ModuleType("openrouteservice.exceptions")
+    exceptions.ApiError = _StubApiError
+    stub.exceptions = exceptions
+
+    sys.modules["openrouteservice"] = stub
+    sys.modules["openrouteservice.exceptions"] = exceptions
+
+
 _install_kompy_stub_if_missing()
+_install_openrouteservice_stub_if_missing()

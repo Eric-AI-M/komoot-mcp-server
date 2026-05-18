@@ -13,11 +13,18 @@ SPORT_PROFILES = {
 }
 
 class RoutingManager:
-    def __init__(self):
-        api_key = os.environ.get("ORS_API_KEY")
-        if not api_key:
-            raise RoutingError("ORS_API_KEY environment variable must be set")
-        self.client = openrouteservice.Client(key=api_key)
+    def __init__(self, api_key: str | None = None):
+        # Per-request key wins; fall back to env for stdio/local-dev so
+        # single-user setups keep working without the platform gateway.
+        key = api_key or os.environ.get("ORS_API_KEY")
+        if not key:
+            raise RoutingError(
+                "ORS API key not configured for this org. Add it in the "
+                "dashboard under Komoot credentials (free signup at "
+                "https://openrouteservice.org/dev/#/signup), or set "
+                "ORS_API_KEY when running in stdio mode."
+            )
+        self.client = openrouteservice.Client(key=key)
 
     def _build_options(self, sport, prefer_trails, avoid_roads):
         avoid_features = []
