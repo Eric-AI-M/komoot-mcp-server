@@ -124,6 +124,56 @@ class TestPerRequestAuthManager:
             reset_auth_manager(token)
 
     @pytest.mark.asyncio
+    async def test_user_profile_display_falls_back_when_username_unknown(self):
+        """When kompy returns the literal 'unknown' placeholder for the
+        display name, the profile dict + rendered tool string should fall
+        back to the email so users don't see 'Profile: unknown'."""
+        registered: dict[str, callable] = {}
+
+        class _Mcp:
+            def tool(self):
+                def decorator(fn):
+                    registered[fn.__name__] = fn
+                    return fn
+                return decorator
+
+        from komoot_mcp.tools import browse_tools
+        browse_tools.register(_Mcp())
+
+        # Drop in a connector whose authentication returns the literal
+        # "unknown" username — the placeholder kompy hands back when
+        # Komoot's login response omits a display name.
+        class _UnknownAuth:
+            def get_username(self):
+                return "unknown"
+
+            def get_email_address(self):
+                return "frank@x.com"
+
+        class _UnknownConnector:
+            def __init__(self, email, password):
+                self.authentication = _UnknownAuth()
+
+        am = AuthManager(email="frank@x.com", password="pw")
+        token = set_auth_manager(am)
+        try:
+            with patch.object(kompy, "KomootConnector", _UnknownConnector):
+                from komoot_mcp.context import get_client
+
+                # Direct client check: dict carries the fallback explicitly.
+                profile = await get_client().get_user_profile()
+                assert profile["display_name"] == "frank@x.com"
+                assert profile["username"] == "unknown"
+                assert profile["email"] == "frank@x.com"
+
+                # Tool-handler check: rendered string must not say "Profile: unknown".
+                out = await registered["komoot_get_user_profile"]()
+            assert "Profile: unknown" not in out
+            assert "frank@x.com" in out
+        finally:
+            reset_auth_manager(token)
+
+    @pytest.mark.asyncio
     async def test_user_profile_tool_no_silent_swallow(self):
         """get_user_profile should propagate kompy errors via the handler."""
         registered: dict[str, callable] = {}

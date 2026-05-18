@@ -70,10 +70,29 @@ class KomootClient:
         # please login first." The earlier silent ``except`` masked that
         # bug; with the swallow removed we now correctly read the username
         # off the already-authenticated connector instead.
+        #
+        # NOTE on the "username" field: kompy's login response stores the
+        # numeric Komoot user ID under the ``username`` key, and there is
+        # no public-API display name field. ``get_username`` therefore
+        # returns the user ID as a string (or the placeholder "unknown"
+        # if Komoot ever omits it). We expose a derived ``display_name``
+        # that falls back to email, then user_id, so callers always have
+        # something useful to render.
         api = self._get_api()
+        username = await asyncio.to_thread(api.authentication.get_username)
+        email = await asyncio.to_thread(api.authentication.get_email_address)
+        # In kompy, get_username() is the user ID. Keep both names for
+        # clarity and back-compat with any caller still reading "username".
+        user_id = username
+        if not username or username == "unknown":
+            display_name = email or (str(user_id) if user_id else "unknown")
+        else:
+            display_name = username
         return {
-            "username": await asyncio.to_thread(api.authentication.get_username),
-            "email": await asyncio.to_thread(api.authentication.get_email_address),
+            "display_name": display_name,
+            "username": username,
+            "user_id": user_id,
+            "email": email,
         }
 
     async def list_tours(
