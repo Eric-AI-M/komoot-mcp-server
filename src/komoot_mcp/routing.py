@@ -154,11 +154,14 @@ class KomootNativePlanner:
             "constitution": int(constitution),
             "sport": sport_komoot,
             "path": path,
-            # Single "Routed" segment connecting all waypoints — this
-            # is how Komoot's frontend submits a fresh plan. We're not
-            # importing a manually-drawn geometry, so ``geometry`` is
-            # empty and Komoot fills it in.
-            "segments": [{"geometry": [], "type": "Routed"}],
+            # Komoot requires len(segments) == len(path) - 1 — one
+            # "Routed" segment per leg between waypoints. We're not
+            # importing manually-drawn geometry, so each segment's
+            # ``geometry`` stays empty and Komoot fills it in via its
+            # own routing engine.
+            "segments": [
+                {"geometry": [], "type": "Routed"} for _ in range(len(path) - 1)
+            ],
         }
         params = {"sport": sport_komoot, "_embedded": self._EMBED}
         try:
