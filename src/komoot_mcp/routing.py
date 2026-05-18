@@ -1,12 +1,57 @@
 import json
 import os
 
+import gpxpy
+import gpxpy.gpx
 import openrouteservice
 import requests
 
 
 class RoutingError(Exception):
     pass
+
+
+def _ors_rte_to_trk_gpx(ors_xml: str, name: str = "Planned route") -> str:
+    """Convert an ORS GPX (which encodes routes as ``<rte>/<rtept>``) into
+    a Komoot-compatible GPX (which expects ``<trk>/<trkseg>/<trkpt>``).
+
+    Issue #18: Komoot's upload endpoint rejects ORS-formatted GPX with
+    HTTP 400. ORS returns route points (``rtept``); Komoot wants track
+    points (``trkpt``). Without this conversion every route planned via
+    ``komoot_plan_route`` fails to upload.
+
+    Behaviour:
+
+    * Every ``<rte>`` in the ORS GPX becomes one ``<trk>`` with a single
+      ``<trkseg>`` carrying the same points (lat, lon, ele preserved).
+    * Existing ``<trk>`` elements in the input are preserved verbatim.
+    * Top-level metadata (``name``, ``creator``) is set to indicate the
+      conversion source so downstream debugging is unambiguous.
+    """
+    src = gpxpy.parse(ors_xml)
+    out = gpxpy.gpx.GPX()
+    out.creator = "komoot-mcp-server (via openrouteservice)"
+    out.name = name
+
+    # Preserve any pre-existing tracks (ORS rarely emits them but a future
+    # change to ORS or a different upstream could).
+    for trk in src.tracks:
+        out.tracks.append(trk)
+
+    # Convert each route to a track.
+    for rte in src.routes:
+        track = gpxpy.gpx.GPXTrack(name=rte.name or name)
+        out.tracks.append(track)
+        seg = gpxpy.gpx.GPXTrackSegment()
+        track.segments.append(seg)
+        for pt in rte.points:
+            seg.points.append(gpxpy.gpx.GPXTrackPoint(
+                latitude=pt.latitude,
+                longitude=pt.longitude,
+                elevation=pt.elevation,
+            ))
+
+    return out.to_xml()
 
 SPORT_PROFILES = {
     "hike": "foot-hiking",
@@ -165,7 +210,8 @@ class RoutingManager:
         return options if options else None
 
     def plan_route(self, start, end=None, roundtrip=False, target_distance_km=None,
-                   sport="hike", prefer_trails=False, avoid_roads=False, waypoints=None):
+                   sport="hike", prefer_trails=False, avoid_roads=False, waypoints=None,
+                   _raw_ors_gpx=False):
         profile = SPORT_PROFILES.get(sport)
         if not profile:
             raise RoutingError(f"Unknown sport: {sport}. Valid: {list(SPORT_PROFILES.keys())}")
@@ -221,12 +267,33 @@ class RoutingManager:
         # ``response.json()`` on it and raises ``HTTPError(200)``. Fetch
         # it ourselves over plain HTTP. See ``_fetch_gpx`` for the long
         # version of why.
-        gpx_result = self._fetch_gpx(
+        ors_gpx = self._fetch_gpx(
             profile=profile,
             coordinates=coords,
             options=options,
             radiuses=radiuses,
         )
+
+        # Issue #18: ORS GPX uses <rte>/<rtept> which Komoot rejects on
+        # upload with HTTP 400. Convert to <trk>/<trkseg>/<trkpt> by
+        # default so the output can flow straight into komoot_upload_tour
+        # or komoot_plan_and_upload. The ``_raw_ors_gpx`` escape hatch is
+        # internal-only (no MCP tool exposes it) — useful for debugging
+        # ORS responses or feeding tools that prefer route format.
+        if _raw_ors_gpx:
+            gpx_result = ors_gpx
+        else:
+            try:
+                gpx_result = _ors_rte_to_trk_gpx(
+                    ors_gpx, name=f"Planned {sport} route",
+                )
+            except Exception as e:
+                # Don't fail the whole plan if conversion blows up —
+                # surface the raw ORS body so the caller has *something*
+                # to work with, plus a clear hint in the error.
+                raise RoutingError(
+                    f"ORS route planned but GPX format conversion failed: {e}"
+                )
 
         feature = result["features"][0]
         props = feature["properties"]
