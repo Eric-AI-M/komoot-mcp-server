@@ -9,7 +9,7 @@ FROM python:3.12-slim AS production
 WORKDIR /app
 
 ARG GIT_SHA=unknown
-LABEL org.opencontainers.image.revision=$GIT_SHA
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
