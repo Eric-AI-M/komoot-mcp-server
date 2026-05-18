@@ -82,15 +82,21 @@ class TestGetTourGpxToolReturnsInline:
         assert "saved to" not in out
 
     @pytest.mark.asyncio
-    async def test_truncates_oversized_gpx(self, monkeypatch):
+    async def test_returns_large_gpx_in_full(self, monkeypatch):
+        """Real-world planned routes are 300–500 KB. The tool must
+        return the full content — no truncation, no cap. Regression
+        test for the bug where PR #12's 200 KB cap silently chopped
+        real routes in half.
+        """
         from komoot_mcp.tools import data_tools
-
-        # Pretend the max is tiny so we can trigger truncation cheaply.
-        monkeypatch.setattr(data_tools, "_INLINE_GPX_MAX_BYTES", 32)
 
         registered = _build_tool_registry(data_tools)
 
-        gpx_payload = "<gpx>" + ("x" * 200) + "</gpx>"
+        # Fabricate a >400 KB GPX body — well above the old 200 KB
+        # cap and roughly the size of a typical 70 km planned route.
+        body = "x" * 400_000
+        gpx_payload = f"<gpx>{body}</gpx>"
+        assert len(gpx_payload) > 300_000  # sanity check
 
         class _FakeClient:
             async def get_tour_gpx(self, tour_id):
@@ -99,10 +105,14 @@ class TestGetTourGpxToolReturnsInline:
         monkeypatch.setattr(data_tools, "get_client", lambda: _FakeClient())
 
         out = await registered["komoot_get_tour_gpx"](tour_id=42)
-        assert "truncated for display" in out
-        # The full byte count is still reported so the caller knows
-        # how much was elided.
-        assert f"{len(gpx_payload)} bytes" in out
+        # No truncation language anywhere in the output.
+        assert "truncated" not in out
+        assert "omitted" not in out
+        # The full byte count is reported.
+        assert f"({len(gpx_payload)} bytes)" in out
+        # The full body is present verbatim, fenced.
+        assert "```xml" in out
+        assert gpx_payload in out
 
 
 class TestGetTourWayTypesRendering:

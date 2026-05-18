@@ -2,15 +2,9 @@
 
 from komoot_mcp.context import get_client
 
-# Soft cap on inline GPX size. GPX for a single tour is typically a few
-# hundred KB; above ~200 KB we truncate the rendered block to keep the
-# tool result responsive without breaking the protocol. The full size
-# in bytes is always reported so callers know what they got.
-_INLINE_GPX_MAX_BYTES = 200_000
-
 
 def _format_gpx_response(label: str, gpx: str) -> str:
-    """Wrap GPX XML in a fenced code block, truncating if oversized.
+    """Wrap GPX XML in a fenced code block with a byte-count header.
 
     Returns a tool-result string of the shape::
 
@@ -19,22 +13,14 @@ def _format_gpx_response(label: str, gpx: str) -> str:
         <gpx>...</gpx>
         ```
 
-    For oversized responses the body is truncated with a note that
-    points the caller at ``komoot_get_tour_coordinates`` for a
-    coordinates-only view. Designed for issue #9: callers behind the
-    multi-tenant gateway have no access to the server's filesystem.
+    The full GPX body is always returned verbatim — callers need the
+    complete content to upload back to Komoot or save locally. Real-
+    world planned routes routinely exceed 300–500 KB; MCP / JSON-RPC
+    handles payloads of that size fine, so no size cap is applied.
+    Designed for issue #9: callers behind the multi-tenant gateway
+    have no access to the server's filesystem.
     """
     size = len(gpx)
-    if size > _INLINE_GPX_MAX_BYTES:
-        head = gpx[:_INLINE_GPX_MAX_BYTES]
-        truncated_bytes = size - _INLINE_GPX_MAX_BYTES
-        return (
-            f"GPX for {label} ({size} bytes — truncated for display, "
-            f"{truncated_bytes} bytes omitted):\n"
-            f"```xml\n{head}\n```\n"
-            f"Use komoot_get_tour_coordinates for the coordinate list "
-            f"only."
-        )
     return f"GPX for {label} ({size} bytes):\n```xml\n{gpx}\n```"
 
 
@@ -69,8 +55,8 @@ def register(mcp):
 
         The GPX XML is embedded directly in the tool result (fenced code
         block) so the caller can read, save, or forward it without
-        needing access to the server's filesystem. For very large tours
-        the body is truncated; the byte-size is always reported.
+        needing access to the server's filesystem. The full body is
+        always returned; the byte-size is reported in the header line.
 
         Args:
             tour_id: The numeric tour ID
