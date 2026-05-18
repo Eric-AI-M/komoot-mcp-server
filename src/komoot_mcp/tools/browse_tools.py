@@ -75,7 +75,13 @@ def register(mcp):
         try:
             profile = await get_client().get_user_profile()
             if isinstance(profile, dict):
-                return f"Profile: {profile.get('displayname', 'unknown')} | User ID: {profile.get('username', '?')}"
+                # ``display_name`` already falls back from username -> email
+                # -> user_id in the client, so this never renders the
+                # literal "unknown" placeholder kompy sometimes hands back.
+                display = profile.get("display_name") or profile.get("email") or "?"
+                email = profile.get("email") or "?"
+                user_id = profile.get("user_id") or profile.get("username") or "?"
+                return f"Profile: {display} ({email}) | User ID: {user_id}"
             return str(profile)
         except Exception as e:
             return f"Error getting profile: {e}"
