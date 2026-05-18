@@ -231,6 +231,11 @@ def register(mcp):
                 gpx_content=gpx,
                 sport=activity,
                 tour_name=name,
+                # The user's intent is "save this planned route to
+                # Komoot", not "log an activity I just did". Explicit
+                # here even though it's the helper's default, so the
+                # intent is grep-able from this call site.
+                tour_type="tour_planned",
             )
         except Exception as e:
             return (

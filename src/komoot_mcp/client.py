@@ -524,6 +524,7 @@ class KomootClient:
         gpx_content,
         sport="touringbicycle",
         tour_name=None,
+        tour_type="tour_planned",
     ):
         """Upload a GPX directly to Komoot and return the new tour ID.
 
@@ -535,8 +536,22 @@ class KomootClient:
         capture the response body.
 
         Mirrors kompy's request shape (URL, auth, headers, params) so
-        Komoot's server-side behaviour is unchanged. The only difference
-        is that we read the JSON body and return its ``id``.
+        Komoot's server-side behaviour is unchanged, except for one
+        extra knob: ``tour_type``. The Komoot ``/v007/tours/`` endpoint
+        creates a ``tour_recorded`` activity by default ("I rode this
+        today"), which is wrong when the user's intent is "save this
+        planned route to Komoot". We pass ``type=tour_planned`` as a
+        query param so the uploaded GPX lands under Planned Routes
+        instead of Activities. ``tour_recorded`` remains a valid value
+        for callers that genuinely uploaded recorded GPS data — they
+        should use ``komoot_upload_tour`` instead, which keeps kompy's
+        default ``tour_recorded`` behaviour.
+
+        Note: the official Komoot v007 API docs only list ``sport``,
+        ``time_in_motion`` and ``name`` for GPX upload; ``type`` is
+        undocumented but matches the parameter Komoot's web frontend
+        uses when importing a GPX as a planned tour, and matches the
+        ``type`` filter on the tour-list GET endpoint.
 
         Returns ``{"id": <int>, "status": "uploaded"|"duplicate"}`` on
         201/202. Raises ``KomootAPIError`` on any other status code.
@@ -562,6 +577,9 @@ class KomootClient:
             "data_type": "gpx",
             "name": name,
             "time_in_motion": None,
+            # See docstring — drives whether Komoot files this under
+            # Planned Routes or Activities.
+            "type": tour_type,
         }
         headers = {"User-Agent": "komoot-mcp-server"}
         body = tour_obj.to_xml().encode("utf-8")
