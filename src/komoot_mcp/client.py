@@ -259,13 +259,36 @@ class KomootClient:
         We fall back to ``.way_type`` for test mocks that mirror the
         kwarg name.
         """
+        return {
+            "way_type": KomootClient._way_type_name(w),
+            "fraction": getattr(w, "amount", None),
+        }
+
+    @staticmethod
+    def _surface_name(s):
+        """Read the readable surface name off a ``kompy.surface.Surface``.
+
+        Same kompy quirk as ``WayType``: the constructor kwarg is
+        ``surface_type`` but the attribute is renamed to ``.type``.
+        We prefer ``.type`` and fall back to ``.surface_type`` for mocks
+        that mirror the kwarg name.
+        """
+        name = getattr(s, "type", None)
+        if name is None:
+            name = getattr(s, "surface_type", None)
+        return name
+
+    @staticmethod
+    def _way_type_name(w):
+        """Read the readable way-type name off a ``kompy.way_type.WayType``.
+
+        Mirrors ``_surface_name`` — kompy stores it under ``.type``;
+        mocks may use ``.way_type``.
+        """
         name = getattr(w, "type", None)
         if name is None:
             name = getattr(w, "way_type", None)
-        return {
-            "way_type": name,
-            "fraction": getattr(w, "amount", None),
-        }
+        return name
 
     async def get_tour_surfaces(self, tour_id):
         api = self._get_api()
@@ -311,15 +334,22 @@ class KomootClient:
                 return []
             events = []
             for s in getattr(summary, "surfaces", None) or []:
+                # Real kompy stores the readable name under ``.type``
+                # (constructor kwarg is ``surface_type``). Reading the
+                # kwarg name directly is what produced ``? (0)`` rows in
+                # production — match the ``_way_type_to_dict`` precedent
+                # and prefer ``.type``, fall back for mocks.
+                name = self._surface_name(s)
                 events.append({
                     "type": "surface",
-                    "description": f"{getattr(s, 'surface_type', '?')} "
+                    "description": f"{name if name is not None else '?'} "
                                    f"({getattr(s, 'amount', 0)})",
                 })
             for w in getattr(summary, "way_types", None) or []:
+                name = self._way_type_name(w)
                 events.append({
                     "type": "way_type",
-                    "description": f"{getattr(w, 'way_type', '?')} "
+                    "description": f"{name if name is not None else '?'} "
                                    f"({getattr(w, 'amount', 0)})",
                 })
             return events

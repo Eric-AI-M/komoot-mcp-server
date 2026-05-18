@@ -118,6 +118,34 @@ class TestGetTourTimeline:
         result = await client.get_tour_timeline(42)
         assert result == []
 
+    @pytest.mark.asyncio
+    async def test_prefers_kompy_type_attribute_over_kwargs(self, client):
+        """Real kompy stores readable names on ``.type`` for both
+        ``Surface`` and ``WayType`` (constructor kwargs are
+        ``surface_type``/``way_type`` but attributes get renamed).
+        The timeline must read ``.type`` first — reading the kwarg
+        name directly is what produced ``? (0)`` rows in production.
+        """
+        tour = _make_tour_stub(with_summary=True)
+        # Objects that mimic real kompy: only ``.type`` is set; the
+        # ``.surface_type`` / ``.way_type`` attributes are intentionally
+        # absent. ``spec=[...]`` blocks MagicMock from auto-creating them.
+        real_surface = MagicMock(spec=["type", "amount"])
+        real_surface.type = "paved"
+        real_surface.amount = 0.6
+        real_way = MagicMock(spec=["type", "amount"])
+        real_way.type = "trail"
+        real_way.amount = 0.4
+        tour.summary.surfaces = [real_surface]
+        tour.summary.way_types = [real_way]
+        _install_api_stub(client, tour)
+        result = await client.get_tour_timeline(42)
+        # No ``? (0)`` rows — the real names come through.
+        descriptions = [e["description"] for e in result]
+        assert any("paved" in d for d in descriptions)
+        assert any("trail" in d for d in descriptions)
+        assert not any(d.startswith("? ") for d in descriptions)
+
 
 class TestGetTourGpx:
     @pytest.mark.asyncio
