@@ -636,3 +636,174 @@ class KomootClient:
     async def delete_tour(self, tour_id):
         api = self._get_api()
         return await self._call(api.delete_tour, tour_id=int(tour_id))
+
+    # ----- Phase 2: direct REST helpers (bypass kompy) ------------------
+    # The four endpoints below are not exposed by kompy. We hit them
+    # directly with Basic auth, mirroring the pattern already used by
+    # ``upload_gpx_capture_id`` — login via kompy (so we have a valid
+    # ``api.authentication`` carrying email + token-as-password), then
+    # POST/GET with ``requests`` and the same credentials.
+    #
+    # Host choice: ``api.komoot.de`` is the documented REST host that
+    # accepts Basic auth (kompy itself uses it). The web app's
+    # ``www.komoot.com/api/v007/...`` paths are equivalent — same
+    # backend gateway — but Basic auth on ``api.komoot.de`` is the
+    # known-working path we already rely on for uploads.
+
+    def _basic_auth(self):
+        """Return a ``(user_id, token)`` tuple usable as ``requests`` auth.
+
+        kompy's ``Authentication`` stores the long-lived token under
+        ``get_password()`` and the numeric user id under
+        ``get_username()`` after login. That pair is the Basic-auth
+        identity Komoot's REST API accepts (the literal email+password
+        pair only works on the v006 ``/account/email/`` login endpoint).
+        """
+        api = self._get_api()
+        return (
+            api.authentication.get_username(),
+            api.authentication.get_password(),
+        )
+
+    async def _http_get_json(self, url, params=None):
+        """Authenticated GET that returns the parsed JSON body.
+
+        Goes through the rate limiter and ``asyncio.to_thread`` so the
+        event loop is not blocked. Raises ``KomootAPIError`` with a
+        useful status code on any non-2xx, mirroring ``_call``'s
+        error-message contract for 401/403/404/429 so the existing
+        tool-layer ``except Exception`` blocks render the same friendly
+        strings.
+        """
+        auth_pair = self._basic_auth()
+        headers = {"User-Agent": "komoot-mcp-server", "Accept": "application/json"}
+
+        def _do():
+            return requests.get(
+                url, auth=auth_pair, headers=headers, params=params, timeout=30,
+            )
+
+        await self.rl.acquire()
+        try:
+            resp = await asyncio.to_thread(_do)
+        except Exception as e:
+            raise KomootAPIError(f"Komoot transport error: {e}")
+
+        if resp.status_code == 200:
+            try:
+                return resp.json()
+            except ValueError as e:
+                raise KomootAPIError(f"Komoot returned non-JSON: {e}")
+        if resp.status_code in (401, 403):
+            raise KomootAPIError(
+                "Authentication failed. Check your credentials."
+            )
+        if resp.status_code == 404:
+            raise KomootAPIError("Resource not found. Check the ID.")
+        if resp.status_code == 429:
+            raise KomootAPIError("Rate limited by Komoot. Try again later.")
+        snippet = (resp.text or "")[:200]
+        raise KomootAPIError(
+            f"Komoot API error: HTTP {resp.status_code} — {snippet}"
+        )
+
+    async def get_tour_full(self, tour_id):
+        """Single-call full hydrate of a tour.
+
+        Replaces 5+ chained kompy calls (coordinates + way_types +
+        surfaces + directions + cover_images + timeline) with one
+        embed-everything request. The response is HAL+JSON with all
+        embeds populated under ``_embedded``.
+
+        See ``/Users/marcodetering/komoot-endpoint-map.md`` — the URL
+        below was live-tested at 200 OK via cookie session and works
+        with the same Basic-auth identity kompy already uses.
+        """
+        url = f"https://api.komoot.de/v007/tours/{int(tour_id)}"
+        params = {
+            "_embedded": (
+                "coordinates,way_types,surfaces,directions,participants,"
+                "timeline,cover_images"
+            ),
+            "directions": "v2",
+            "fields": "timeline",
+            "format": "coordinate_array",
+            "timeline_highlights_fields": "tips,recommenders",
+        }
+        return await self._http_get_json(url, params=params)
+
+    async def get_highlight(
+        self, highlight_id, with_tips=False, with_recommenders=False,
+    ):
+        """Resolve a Komoot highlight (POI) by ID.
+
+        Returns a dict with keys ``metadata`` (always), ``tips`` (only
+        when ``with_tips=True``) and ``recommenders`` (only when
+        ``with_recommenders=True``). Tour timeline entries reference
+        highlights by ID — without this resolver those IDs are
+        dead-ends.
+
+        Endpoints (all live-tested 200 in the endpoint map):
+
+        * ``GET /v007/highlights/{id}``
+        * ``GET /v007/highlights/{id}/tips/?page=0``
+        * ``GET /v007/highlights/{id}/recommenders/``
+        """
+        hid = int(highlight_id)
+        base = f"https://api.komoot.de/v007/highlights/{hid}"
+        out = {"metadata": await self._http_get_json(base)}
+        if with_tips:
+            try:
+                out["tips"] = await self._http_get_json(
+                    f"{base}/tips/", params={"page": 0},
+                )
+            except KomootAPIError as e:
+                out["tips_error"] = str(e)
+        if with_recommenders:
+            try:
+                out["recommenders"] = await self._http_get_json(
+                    f"{base}/recommenders/",
+                )
+            except KomootAPIError as e:
+                out["recommenders_error"] = str(e)
+        return out
+
+    async def get_tour_weather(self, tour_id):
+        """Fetch the weather forecast along a tour.
+
+        Hits Komoot's dedicated weather-along-tour service:
+        ``GET https://weather-along-tour-api.komoot.de/v1/weather?tour_id={id}``
+
+        The exact query-param shape is best-effort — the endpoint
+        wasn't live-probed (the multi-tenant deployment doesn't have
+        a shared probing account). We try ``tour_id`` first because
+        that's the documented service name; if Komoot rejects with
+        400/422 the tool layer surfaces the error verbatim so the
+        caller can iterate.
+        """
+        url = "https://weather-along-tour-api.komoot.de/v1/weather"
+        return await self._http_get_json(url, params={"tour_id": int(tour_id)})
+
+    async def discover_near(self, lat, lng, sport=None, limit=10):
+        """Discover tours / collections / smart tours near a point.
+
+        Endpoint live-tested at 200:
+        ``GET /v007/discover/{lat,lng}/elements/?page=0&_embedded=main_tour,summary``
+
+        Returns the parsed JSON body. Items live under
+        ``_embedded.items``. ``sport`` is forwarded as a filter when
+        provided. ``limit`` is forwarded as ``limit`` though Komoot may
+        clamp it server-side.
+        """
+        # Komoot's path is ``{lat,lng}`` literal — comma-separated in
+        # the URL segment, not a JSON object.
+        loc = f"{float(lat)},{float(lng)}"
+        url = f"https://api.komoot.de/v007/discover/{loc}/elements/"
+        params = {
+            "page": 0,
+            "limit": int(limit),
+            "_embedded": "main_tour,summary",
+        }
+        if sport:
+            params["sport"] = sport
+        return await self._http_get_json(url, params=params)
