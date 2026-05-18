@@ -1,29 +1,41 @@
 """Tour data tools for Komoot MCP server."""
 
-import os
-import tempfile
-
 from komoot_mcp.context import get_client
 
+# Soft cap on inline GPX size. GPX for a single tour is typically a few
+# hundred KB; above ~200 KB we truncate the rendered block to keep the
+# tool result responsive without breaking the protocol. The full size
+# in bytes is always reported so callers know what they got.
+_INLINE_GPX_MAX_BYTES = 200_000
 
-def _default_gpx_path(tour_id: int) -> str:
-    """Pick a writable GPX target inside ``KOMOOT_DATA_DIR``.
 
-    Hard-coded ``./tour_{id}.gpx`` failed under the container (CWD
-    ``/app`` is owned by root and the process runs as ``nobody``).
-    Use a tempfile path under the configured data dir instead.
+def _format_gpx_response(label: str, gpx: str) -> str:
+    """Wrap GPX XML in a fenced code block, truncating if oversized.
+
+    Returns a tool-result string of the shape::
+
+        GPX for <label> (<N> bytes):
+        ```xml
+        <gpx>...</gpx>
+        ```
+
+    For oversized responses the body is truncated with a note that
+    points the caller at ``komoot_get_tour_coordinates`` for a
+    coordinates-only view. Designed for issue #9: callers behind the
+    multi-tenant gateway have no access to the server's filesystem.
     """
-    data_dir = os.environ.get("KOMOOT_DATA_DIR", "/tmp/komoot")
-    os.makedirs(data_dir, exist_ok=True)
-    fd = tempfile.NamedTemporaryFile(
-        delete=False,
-        prefix=f"tour_{tour_id}_",
-        suffix=".gpx",
-        dir=data_dir,
-    )
-    path = fd.name
-    fd.close()
-    return path
+    size = len(gpx)
+    if size > _INLINE_GPX_MAX_BYTES:
+        head = gpx[:_INLINE_GPX_MAX_BYTES]
+        truncated_bytes = size - _INLINE_GPX_MAX_BYTES
+        return (
+            f"GPX for {label} ({size} bytes — truncated for display, "
+            f"{truncated_bytes} bytes omitted):\n"
+            f"```xml\n{head}\n```\n"
+            f"Use komoot_get_tour_coordinates for the coordinate list "
+            f"only."
+        )
+    return f"GPX for {label} ({size} bytes):\n```xml\n{gpx}\n```"
 
 
 def register(mcp):
@@ -52,21 +64,22 @@ def register(mcp):
             return f"Error getting coordinates: {e}"
 
     @mcp.tool()
-    async def komoot_get_tour_gpx(tour_id: int, filepath: str = None) -> str:
-        """Download a tour as a GPX file.
+    async def komoot_get_tour_gpx(tour_id: int) -> str:
+        """Return a tour's GPX content inline in the response.
+
+        The GPX XML is embedded directly in the tool result (fenced code
+        block) so the caller can read, save, or forward it without
+        needing access to the server's filesystem. For very large tours
+        the body is truncated; the byte-size is always reported.
 
         Args:
             tour_id: The numeric tour ID
-            filepath: Path to save the GPX file. If not provided, saves to
-                a tempfile in ``KOMOOT_DATA_DIR`` (default ``/tmp/komoot``).
         """
         try:
-            if filepath is None:
-                filepath = _default_gpx_path(tour_id)
-            result = await get_client().get_tour_gpx(tour_id, filepath)
-            return f"GPX saved to: {result}"
+            gpx = await get_client().get_tour_gpx(tour_id)
         except Exception as e:
             return f"Error downloading GPX: {e}"
+        return _format_gpx_response(f"tour {tour_id}", gpx)
 
     @mcp.tool()
     async def komoot_get_tour_directions(tour_id: int) -> str:
@@ -95,7 +108,18 @@ def register(mcp):
             if not way_types:
                 return "No way type data found."
             if isinstance(way_types, list):
-                return f"Way types for tour {tour_id}:\n" + "\n".join(f"  {w}" for w in way_types)
+                lines = [f"Way types for tour {tour_id}:"]
+                for w in way_types:
+                    if isinstance(w, dict):
+                        name = w.get("way_type", "?")
+                        frac = w.get("fraction")
+                        if isinstance(frac, (int, float)):
+                            lines.append(f"  {name}: {frac * 100:.1f}%")
+                        else:
+                            lines.append(f"  {name}: {frac}")
+                    else:
+                        lines.append(f"  {w}")
+                return "\n".join(lines)
             return f"Way types for tour {tour_id}: {way_types}"
         except Exception as e:
             return f"Error getting way types: {e}"

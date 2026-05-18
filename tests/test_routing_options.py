@@ -25,17 +25,25 @@ from komoot_mcp.routing import (
 
 
 class _FakeOrsClient:
-    """Stand-in for ``openrouteservice.Client`` that records every call."""
+    """Stand-in for ``openrouteservice.Client`` that records every call.
+
+    Note: as of the issue #11 fix, ``RoutingManager`` no longer calls
+    ``client.directions(..., format="gpx")`` — the ORS Python client
+    runs every response through ``response.json()`` and raises
+    ``HTTPError(200)`` on the GPX XML body. The GPX is fetched via the
+    raw ``requests.post`` path now (mocked in tests via
+    ``fake_requests_post``). The fake client therefore only needs to
+    handle the GeoJSON path.
+    """
 
     def __init__(self, key=None):
         self.key = key
+        self._base_url = "https://api.openrouteservice.org"
+        self._timeout = 60
         self.calls: list[dict[str, Any]] = []
 
     def directions(self, **kwargs):
         self.calls.append(kwargs)
-        fmt = kwargs.get("format")
-        if fmt == "gpx":
-            return "<gpx></gpx>"
         # Minimal GeoJSON shape the production code reads.
         return {
             "features": [
@@ -55,9 +63,48 @@ class _FakeOrsClient:
         }
 
 
+class _FakeResponse:
+    def __init__(self, status_code=200, text="<gpx></gpx>"):
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):  # pragma: no cover - only used on error path
+        import json as _json
+        return _json.loads(self.text)
+
+
 @pytest.fixture
-def manager(monkeypatch):
-    """A RoutingManager pre-wired with a fake ORS client."""
+def gpx_post_calls(monkeypatch):
+    """Capture every ``requests.post`` call our ``_fetch_gpx`` makes.
+
+    Returns the recording list so tests can assert on URL / body shape.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(url, data=None, headers=None, timeout=None, **kwargs):
+        calls.append({
+            "url": url,
+            "data": data,
+            "headers": headers,
+            "timeout": timeout,
+        })
+        return _FakeResponse(status_code=200, text="<gpx></gpx>")
+
+    # Patch where it's looked up — ``komoot_mcp.routing`` imports
+    # ``requests`` at module scope.
+    import komoot_mcp.routing as routing_mod
+    monkeypatch.setattr(routing_mod.requests, "post", fake_post)
+    return calls
+
+
+@pytest.fixture
+def manager(monkeypatch, gpx_post_calls):
+    """A RoutingManager pre-wired with a fake ORS client.
+
+    ``gpx_post_calls`` is included so every manager test also has the
+    GPX HTTP path mocked; tests that don't care about it can ignore the
+    list.
+    """
     monkeypatch.setenv("ORS_API_KEY", "test-key")
     m = RoutingManager()
     m.client = _FakeOrsClient(key="test-key")
@@ -125,20 +172,26 @@ class TestCoordOrderAndSnapping:
         out = _to_lon_lat([49.0094, 8.4001, 120.0])
         assert out == [8.4001, 49.0094]
 
-    def test_plan_route_sends_lon_lat_to_ors(self, manager):
+    def test_plan_route_sends_lon_lat_to_ors(self, manager, gpx_post_calls):
         # Inputs are ``(lat, lon)`` per the tool layer's contract.
         start = (49.0094, 8.4001)
         end = (49.0136, 8.4045)
         manager.plan_route(start=start, end=end, sport="hike")
 
-        # Two calls expected: geojson + gpx, both with the same coords.
-        assert len(manager.client.calls) == 2
-        for call in manager.client.calls:
-            coords = call["coordinates"]
-            assert coords[0] == [8.4001, 49.0094]
-            assert coords[-1] == [8.4045, 49.0136]
+        # GeoJSON goes through the client; GPX goes through ``requests``.
+        assert len(manager.client.calls) == 1
+        assert len(gpx_post_calls) == 1
 
-    def test_plan_route_extends_snap_radius(self, manager):
+        coords = manager.client.calls[0]["coordinates"]
+        assert coords[0] == [8.4001, 49.0094]
+        assert coords[-1] == [8.4045, 49.0136]
+
+        import json
+        body = json.loads(gpx_post_calls[0]["data"])
+        assert body["coordinates"][0] == [8.4001, 49.0094]
+        assert body["coordinates"][-1] == [8.4045, 49.0136]
+
+    def test_plan_route_extends_snap_radius(self, manager, gpx_post_calls):
         start = (49.0094, 8.4001)
         end = (49.0136, 8.4045)
         manager.plan_route(start=start, end=end, sport="hike")
@@ -146,13 +199,18 @@ class TestCoordOrderAndSnapping:
         # ``radiuses`` should be present and at least the configured
         # default per waypoint — the bug was the default 350m being too
         # tight for geocoder hits.
-        for call in manager.client.calls:
-            radii = call.get("radiuses")
-            assert radii is not None
-            assert len(radii) == len(call["coordinates"])
-            assert all(r >= _DEFAULT_SNAP_RADIUS_M for r in radii)
+        radii = manager.client.calls[0].get("radiuses")
+        assert radii is not None
+        assert len(radii) == len(manager.client.calls[0]["coordinates"])
+        assert all(r >= _DEFAULT_SNAP_RADIUS_M for r in radii)
 
-    def test_plan_route_mtb_prefer_trails_does_not_send_highways(self, manager):
+        import json
+        body = json.loads(gpx_post_calls[0]["data"])
+        assert body["radiuses"] == radii
+
+    def test_plan_route_mtb_prefer_trails_does_not_send_highways(
+        self, manager, gpx_post_calls,
+    ):
         # End-to-end: the MTB + prefer_trails case that triggered the
         # production bug must not put ``highways`` on the wire.
         start = (49.0094, 8.4001)
@@ -160,6 +218,9 @@ class TestCoordOrderAndSnapping:
         manager.plan_route(
             start=start, end=end, sport="mountain_bike", prefer_trails=True,
         )
-        for call in manager.client.calls:
-            options = call.get("options") or {}
-            assert "highways" not in options.get("avoid_features", [])
+        options = manager.client.calls[0].get("options") or {}
+        assert "highways" not in options.get("avoid_features", [])
+        import json
+        body = json.loads(gpx_post_calls[0]["data"])
+        gpx_avoid = (body.get("options") or {}).get("avoid_features", [])
+        assert "highways" not in gpx_avoid

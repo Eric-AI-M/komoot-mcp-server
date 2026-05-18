@@ -55,9 +55,18 @@ def _make_tour_stub(*, with_summary=True, with_info=True):
     tour.path = []
     if with_summary:
         # Mimic the TourSummary shape: surfaces + way_types lists of
-        # objects with the production attribute names.
-        surface = MagicMock(surface_type="asphalt", amount=0.7)
-        way = MagicMock(way_type="road", amount=0.7)
+        # objects with the production attribute names. We use
+        # ``spec=[...]`` so MagicMock doesn't auto-create the OTHER
+        # attribute — for ``WayType`` real kompy stores the readable
+        # name under ``.type`` (the constructor kwarg is ``way_type``);
+        # tests that don't pin that down with spec=[] silently let
+        # MagicMock satisfy any ``getattr(w, 'type', ...)`` lookup.
+        surface = MagicMock(spec=["surface_type", "amount"])
+        surface.surface_type = "asphalt"
+        surface.amount = 0.7
+        way = MagicMock(spec=["way_type", "amount"])
+        way.way_type = "road"
+        way.amount = 0.7
         tour.summary = MagicMock(surfaces=[surface], way_types=[way])
     else:
         tour.summary = None
@@ -164,3 +173,86 @@ class TestGetTourSurfaces:
         assert result[0]["type"] == "warning"
         assert result[0]["segments"][0]["from"] == 0
         assert result[0]["segments"][0]["to"] == 5
+
+
+class TestGetTourWayTypes:
+    """Issue #10: way_types was returning raw Waypoint reprs.
+
+    The breakdown actually lives on ``tour.summary.way_types`` (a list
+    of ``kompy.way_type.WayType`` objects with ``.type`` and ``.amount``).
+    The fixed client emits ``{way_type, fraction}`` dicts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_serializes_summary_way_types_to_dicts(self, client):
+        tour = _make_tour_stub(with_summary=True)
+        _install_api_stub(client, tour)
+        result = await client.get_tour_way_types(42)
+        # No more ``<...Waypoint object at 0x...>`` reprs in the output.
+        assert isinstance(result, list)
+        assert result and isinstance(result[0], dict)
+        # The mock in _make_tour_stub uses ``way_type="road"``; the
+        # client accepts that kwarg-style attribute as a fallback for
+        # mocks that don't rename to ``.type``.
+        assert result[0]["way_type"] == "road"
+        assert result[0]["fraction"] == 0.7
+
+    @pytest.mark.asyncio
+    async def test_prefers_kompy_type_attribute_over_way_type(self, client):
+        """Real kompy stores the readable name on ``.type``, not
+        ``.way_type``. We must read ``.type`` first to avoid surfacing
+        a meaningless ``None`` for real production data."""
+        from unittest.mock import MagicMock
+
+        tour = _make_tour_stub(with_summary=True)
+        # Object that mimics real kompy: ``.type="trail"`` set; the
+        # ``.way_type`` attribute is intentionally absent. spec=[]
+        # prevents MagicMock from auto-creating ``.way_type``.
+        real_kompy_way = MagicMock(spec=["type", "amount"])
+        real_kompy_way.type = "trail"
+        real_kompy_way.amount = 0.42
+        tour.summary.way_types = [real_kompy_way]
+        _install_api_stub(client, tour)
+        result = await client.get_tour_way_types(42)
+        assert result[0]["way_type"] == "trail"
+        assert result[0]["fraction"] == 0.42
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_summary_missing(self, client):
+        tour = _make_tour_stub(with_summary=False)
+        _install_api_stub(client, tour)
+        result = await client.get_tour_way_types(42)
+        assert result == []
+
+
+class TestGetTourGpxInline:
+    """Issue #9: the GPX must be returned inline as a string, never
+    written to the server's filesystem.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_gpx_string_without_writing_disk(self, client, tmp_path, monkeypatch):
+        tour = _make_tour_stub()
+
+        gpx_obj = type("G", (), {"to_xml": lambda self: "<gpx>inline</gpx>"})()
+
+        def fake_generate(authentication):
+            tour.gpx_track = gpx_obj
+            return True
+
+        _install_api_stub(client, tour, generate_gpx=fake_generate)
+
+        # Sentinel: blow up if anything tries to ``open()`` for writing.
+        real_open = open
+
+        def guarded_open(path, mode="r", *args, **kwargs):
+            if "w" in mode or "a" in mode or "x" in mode:
+                raise AssertionError(
+                    f"GPX path must not write to disk; got open({path!r}, {mode!r})"
+                )
+            return real_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", guarded_open)
+
+        out = await client.get_tour_gpx(42)
+        assert out == "<gpx>inline</gpx>"

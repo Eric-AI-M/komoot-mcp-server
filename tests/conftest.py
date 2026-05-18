@@ -89,9 +89,23 @@ def _install_openrouteservice_stub_if_missing() -> None:
     class _StubApiError(Exception):
         pass
 
+    class _StubHTTPError(Exception):
+        """Mirrors openrouteservice.exceptions.HTTPError used by routing.py.
+
+        The production class is raised by the ORS client when the
+        response body can't be JSON-decoded (which used to happen on
+        every successful GPX request — see issue #11).
+        """
+
+        def __init__(self, status_code):
+            self.status_code = status_code
+            super().__init__(f"HTTP Error: {status_code}")
+
     class _StubClient:
-        def __init__(self, key=None):
+        def __init__(self, key=None, base_url="https://api.openrouteservice.org", timeout=60):
             self.key = key
+            self._base_url = base_url
+            self._timeout = timeout
 
         def directions(self, **kwargs):  # pragma: no cover - not exercised in unit tests
             raise NotImplementedError("RoutingManager tests should mock plan_route, not call ORS")
@@ -101,6 +115,7 @@ def _install_openrouteservice_stub_if_missing() -> None:
 
     exceptions = ModuleType("openrouteservice.exceptions")
     exceptions.ApiError = _StubApiError
+    exceptions.HTTPError = _StubHTTPError
     stub.exceptions = exceptions
 
     sys.modules["openrouteservice"] = stub
