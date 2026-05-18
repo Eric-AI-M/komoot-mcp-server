@@ -676,7 +676,12 @@ class KomootClient:
         strings.
         """
         auth_pair = self._basic_auth()
-        headers = {"User-Agent": "komoot-mcp-server", "Accept": "application/json"}
+        headers = {
+            "User-Agent": "komoot-mcp-server",
+            # Komoot's API returns HAL+JSON and rejects plain
+            # application/json with HTTP 406 HttpMediaTypeNotAcceptable.
+            "Accept": "application/hal+json, application/json",
+        }
 
         def _do():
             return requests.get(
