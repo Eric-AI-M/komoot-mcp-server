@@ -86,7 +86,7 @@ Once connected, you can ask Claude things like:
 - "Geocode 'Marienplatz Munich'"
 - "What way types and surfaces does tour 12345 have?"
 
-## Available Tools (20)
+## Available Tools (40)
 
 ### Authentication
 
@@ -101,7 +101,11 @@ Once connected, you can ask Claude things like:
 | `komoot_list_tours` | List your tours with filters for sport type, visibility, name search, sorting, and pagination |
 | `komoot_get_tour` | Get full details of a specific tour (distance, elevation, duration, difficulty) |
 | `komoot_get_tour_full` | Hydrate a tour in ONE call — replaces 5+ chained calls. Returns name, sport, distance, elevation, surface/way-type breakdown, direction step count, and any timeline highlight IDs (resolve with `komoot_get_highlight`). |
+| `komoot_get_tour_photos` | Get the cover/photo images attached to a tour (renders templated URLs at width=800) |
+| `komoot_get_tour_line` | Get a tour's simplified line geometry (lightweight alt to coordinates) |
 | `komoot_get_highlight` | Resolve a Komoot highlight (POI) by ID. Returns name, category, sport, location. Pass `include_tips=True` for community tips and `include_recommenders=True` for the recommender count. |
+| `komoot_list_user_highlights` | List a user's saved highlights (POIs) |
+| `komoot_get_peaks_bagged` | Get peaks the user has "bagged" (EXPERIMENTAL — endpoint inferred) |
 | `komoot_tour_weather` | Weather forecast along a tour (EXPERIMENTAL — endpoint signature may need runtime verification). Hits Komoot's dedicated weather-along-tour service. |
 | `komoot_get_user_profile` | Retrieve your Komoot profile information |
 
@@ -118,12 +122,36 @@ Once connected, you can ask Claude things like:
 
 > FIT export (`komoot_get_tour_fit`) was removed — kompy does not support generating FIT files. Use the GPX export instead.
 
+### Highlights (POIs)
+
+| Tool | Description |
+|---|---|
+| `komoot_get_highlight_images` | Get photos attached to a Komoot highlight |
+| `komoot_get_highlight_tips` | Get community tips for a Komoot highlight |
+
+### Collections
+
+| Tool | Description |
+|---|---|
+| `komoot_get_collection` | Get a Komoot collection's metadata |
+| `komoot_list_user_collections` | List collections owned by a user (EXPERIMENTAL — endpoint inferred) |
+| `komoot_get_collection_tours` | List the tours inside a collection |
+
+### Sharing
+
+| Tool | Description |
+|---|---|
+| `komoot_create_share_link` | Create a public share link (returns token + URL) |
+| `komoot_revoke_share_link` | Revoke a tour's share token |
+| `komoot_resolve_share_url` | Resolve a Komoot share URL to tour metadata (no auth needed when share token is present) |
+
 ### Write Operations
 
 | Tool | Description |
 |---|---|
 | `komoot_upload_tour` | Upload a GPX, FIT, or TCX file as a new Komoot tour. Pass `sport=` to choose the activity type (default `touringbicycle`). |
 | `komoot_modify_tour` | Modify a tour's metadata (name, sport type, visibility) |
+| `komoot_modify_tour_extended` | Modify extended tour metadata (description, gear, date, name, sport, status) — wider coverage than `komoot_modify_tour` |
 | `komoot_delete_tour` | Permanently delete a tour |
 
 ### Discovery
@@ -131,6 +159,13 @@ Once connected, you can ask Claude things like:
 | Tool | Description |
 |---|---|
 | `komoot_recommend_tours_near` | Discover tours, smart tours, and collections near a `(lat, lng)` point. Optional `sport` filter; returns name, sport, distance, and a share URL per item. |
+| `komoot_smart_tours_near` | Recommend Smart Tours near a point (EXPERIMENTAL — endpoint inferred) |
+| `komoot_smart_tour_for_highlight` | Suggested tours that pass through a highlight |
+| `komoot_smart_tour_for_region` | Suggested tours inside a region |
+| `komoot_discover_with_attributes` | Discover tours filtered by route attributes (scenic, challenging, etc.) |
+| `komoot_route_attribute_options` | List the legal route-attribute names |
+| `komoot_search` | Search Komoot (EXPERIMENTAL — endpoint inferred) |
+| `komoot_get_trailview` | Get Komoot Trailview photos near a point (EXPERIMENTAL — endpoint inferred) |
 
 ### Routing & Geocoding
 

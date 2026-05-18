@@ -891,3 +891,342 @@ class KomootClient:
         if sport:
             params["sport"] = sport
         return await self._http_get_json(url, params=params)
+
+    # ====================================================================
+    # Phase 3 direct-REST helpers — extends the Phase 2 pattern.
+    # ====================================================================
+    # Phase 2 added ``_basic_auth`` + ``_http_get_json``. Phase 3 needs
+    # POST / PATCH / DELETE on top of that. We factor the request loop
+    # into ``_http_request`` which returns parsed JSON (or raw text for
+    # DELETE-style 204s) and route all four verbs through it. ``_http_get_
+    # json`` stays as-is — Phase 2 callers continue to work unchanged.
+
+    async def _http_request(
+        self, method, url, params=None, json_body=None, expect_json=True,
+        no_auth=False,
+    ):
+        """Authenticated HTTP request returning parsed JSON (or text).
+
+        ``method`` is one of GET/POST/PATCH/DELETE. Goes through the
+        rate limiter and ``asyncio.to_thread``. Raises
+        :class:`KomootAPIError` on any non-2xx — preserves the status
+        code in the message so the tool layer's ``except`` block can
+        surface it. ``no_auth=True`` skips Basic auth (used for share-
+        token URLs that authenticate via query param). ``expect_json=
+        False`` returns the raw text body (or ``""`` for 204).
+        """
+        headers = {
+            "User-Agent": "komoot-mcp-server",
+            # Match Phase 2's fix (#23): Komoot rejects plain
+            # application/json with 406 on some endpoints.
+            "Accept": "application/hal+json, application/json",
+        }
+        auth_pair = None if no_auth else self._basic_auth()
+
+        def _do():
+            return requests.request(
+                method=method, url=url, params=params, json=json_body,
+                auth=auth_pair, headers=headers, timeout=30,
+            )
+
+        await self.rl.acquire()
+        try:
+            resp = await asyncio.to_thread(_do)
+        except Exception as e:
+            raise KomootAPIError(f"Komoot transport error: {e}")
+
+        if not resp.ok:
+            if resp.status_code in (401, 403):
+                raise KomootAPIError(
+                    "Authentication failed. Check your credentials."
+                )
+            if resp.status_code == 404:
+                raise KomootAPIError(f"Not found: {url}")
+            if resp.status_code == 429:
+                raise KomootAPIError("Rate limited by Komoot. Try again later.")
+            snippet = (resp.text or "")[:200]
+            raise KomootAPIError(
+                f"Komoot API error: HTTP {resp.status_code} — {snippet}"
+            )
+
+        if not expect_json:
+            return resp.text or ""
+        if not resp.text:
+            return None
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise KomootAPIError(f"Komoot returned non-JSON ({url}): {e}")
+
+    async def _komoot_get(self, url, params=None, no_auth=False):
+        return await self._http_request(
+            "GET", url, params=params, no_auth=no_auth,
+        )
+
+    async def _komoot_post(self, url, json_body=None, params=None):
+        return await self._http_request(
+            "POST", url, params=params, json_body=json_body,
+        )
+
+    async def _komoot_patch(self, url, json_body=None, params=None):
+        return await self._http_request(
+            "PATCH", url, params=params, json_body=json_body,
+        )
+
+    async def _komoot_delete(self, url, params=None):
+        return await self._http_request(
+            "DELETE", url, params=params, expect_json=False,
+        )
+
+    # --- Tour metadata (Phase 3) -----------------------------------
+
+    async def get_tour_photos(self, tour_id, page=0, limit=5):
+        """``GET /v007/tours/{id}/cover_images/?page=N&limit=N``."""
+        url = f"https://api.komoot.de/v007/tours/{int(tour_id)}/cover_images/"
+        return await self._komoot_get(
+            url, params={"page": int(page), "limit": int(limit)},
+        )
+
+    async def get_tour_line(self, tour_id):
+        """``GET /v007/tours/{id}/line`` — simplified line geometry."""
+        url = f"https://api.komoot.de/v007/tours/{int(tour_id)}/line"
+        return await self._komoot_get(url)
+
+    async def create_tour_share_link(self, tour_id):
+        """``POST /v007/tours/{id}/share_token?format=v2&hl=en`` → 201."""
+        url = f"https://api.komoot.de/v007/tours/{int(tour_id)}/share_token"
+        return await self._komoot_post(
+            url, json_body={}, params={"format": "v2", "hl": "en"},
+        )
+
+    async def revoke_tour_share_link(self, tour_id):
+        """``DELETE /v007/tours/{id}/share_token``."""
+        url = f"https://api.komoot.de/v007/tours/{int(tour_id)}/share_token"
+        return await self._komoot_delete(url)
+
+    async def modify_tour_extended(
+        self, tour_id, description=None, gear=None, date=None,
+        status=None, name=None, sport=None,
+    ):
+        """``PATCH /v007/tours/{id}`` — extended field coverage.
+
+        Builds the JSON body from any non-None argument so callers can
+        update arbitrary subsets without clobbering existing fields.
+        """
+        url = f"https://api.komoot.de/v007/tours/{int(tour_id)}"
+        body = {}
+        if description is not None:
+            body["description"] = description
+        if gear is not None:
+            body["gear"] = gear
+        if date is not None:
+            body["date"] = date
+        if status is not None:
+            body["status"] = status
+        if name is not None:
+            body["name"] = name
+        if sport is not None:
+            body["sport"] = sport
+        if not body:
+            raise KomootAPIError("No fields to update")
+        return await self._komoot_patch(url, json_body=body)
+
+    # --- Highlights (Phase 3) --------------------------------------
+
+    async def get_highlight_images(self, highlight_id, page=0):
+        """``GET /v007/highlights/{id}/images/?page=N``."""
+        url = (
+            f"https://api.komoot.de/v007/highlights/{int(highlight_id)}/images/"
+        )
+        return await self._komoot_get(url, params={"page": int(page)})
+
+    async def get_highlight_tips(self, highlight_id, page=0):
+        """``GET /v007/highlights/{id}/tips/?page=N``."""
+        url = (
+            f"https://api.komoot.de/v007/highlights/{int(highlight_id)}/tips/"
+        )
+        return await self._komoot_get(url, params={"page": int(page)})
+
+    async def list_user_highlights(self, user_id, page=0, limit=20):
+        """``GET /v006/users/{user_id}/highlights/?page=N&limit=N``."""
+        url = f"https://api.komoot.de/v006/users/{user_id}/highlights/"
+        return await self._komoot_get(
+            url, params={"page": int(page), "limit": int(limit)},
+        )
+
+    # --- Discover / Smart Tours (Phase 3) --------------------------
+
+    async def smart_tours_near(self, lat, lng, sport, radius_km=20, limit=10):
+        """Best-effort Smart Tour lookup near a point.
+
+        Endpoint shape inferred from the JS-bundle scan — the primary
+        host ``smarttour-api.main.komoot.net/api/v1`` and the fallback
+        ``/v007/smart_tours/`` were not live-probed for this deployment.
+        We try the primary first; on any error we fall back. If both
+        fail the error is surfaced so the caller can iterate.
+        """
+        primary = "https://smarttour-api.main.komoot.net/api/v1/smart_tours"
+        params = {
+            "lat": float(lat),
+            "lng": float(lng),
+            "sport": sport,
+            "radius": int(float(radius_km) * 1000),
+            "limit": int(limit),
+        }
+        try:
+            return await self._komoot_get(primary, params=params)
+        except KomootAPIError as primary_err:
+            fallback = "https://api.komoot.de/v007/smart_tours/"
+            try:
+                return await self._komoot_get(fallback, params=params)
+            except KomootAPIError as fallback_err:
+                raise KomootAPIError(
+                    f"smart_tours_near failed on both hosts: "
+                    f"primary={primary_err}; fallback={fallback_err}"
+                )
+
+    async def smart_tour_for_highlight(self, highlight_id, sport=None):
+        """``GET /v007/discover_tours/for_highlight/?highlight_id&sport``."""
+        url = "https://api.komoot.de/v007/discover_tours/for_highlight/"
+        params = {"highlight_id": int(highlight_id)}
+        if sport:
+            params["sport"] = sport
+        return await self._komoot_get(url, params=params)
+
+    async def smart_tour_for_region(self, region_id, sport=None):
+        """``GET /v007/discover_tours/for_region/?region_id&sport``."""
+        url = "https://api.komoot.de/v007/discover_tours/for_region/"
+        params = {"region_id": region_id}
+        if sport:
+            params["sport"] = sport
+        return await self._komoot_get(url, params=params)
+
+    async def discover_with_attributes(
+        self, lat, lng, sport=None, attributes=None,
+    ):
+        """``GET /v007/discover_tours/from_location/route_attributes/``."""
+        url = (
+            "https://api.komoot.de/v007/discover_tours/"
+            "from_location/route_attributes/"
+        )
+        params = {"lat": float(lat), "lng": float(lng)}
+        if sport:
+            params["sport"] = sport
+        if attributes:
+            if isinstance(attributes, (list, tuple)):
+                params["attributes"] = ",".join(str(a) for a in attributes)
+            else:
+                params["attributes"] = str(attributes)
+        return await self._komoot_get(url, params=params)
+
+    async def route_attribute_options(self):
+        """``GET /v007/discover_tours/route_attributes/``."""
+        url = "https://api.komoot.de/v007/discover_tours/route_attributes/"
+        return await self._komoot_get(url)
+
+    # --- Collections (Phase 3) -------------------------------------
+
+    async def get_collection(self, collection_id):
+        """``GET /v007/collections/{id}``."""
+        url = f"https://api.komoot.de/v007/collections/{int(collection_id)}"
+        return await self._komoot_get(url)
+
+    async def list_user_collections(self, user_id, page=0):
+        """``GET /v007/users/{uid}/collections/`` (path inferred from bundle).
+
+        v007 doesn't enumerate this collection list in our captured
+        endpoint map; kept under v007 because that's where the other
+        user resources live. If Komoot 404s the error surfaces the URL
+        so the caller knows what we tried.
+        """
+        url = f"https://api.komoot.de/v007/users/{user_id}/collections/"
+        return await self._komoot_get(url, params={"page": int(page)})
+
+    async def get_collection_tours(self, collection_id, page=0):
+        """``GET /v007/collections/{id}/compilation/``."""
+        url = (
+            f"https://api.komoot.de/v007/collections/"
+            f"{int(collection_id)}/compilation/"
+        )
+        return await self._komoot_get(url, params={"page": int(page)})
+
+    # --- Search & Resolvers (Phase 3) ------------------------------
+
+    async def search(self, query, kind="tour", sport=None, near=None, limit=10):
+        """Komoot search service (endpoint shape inferred from bundle).
+
+        We hit ``search-api.main.komoot.net/v1/search`` with ``q``,
+        ``type``, ``sport`` and an optional ``near`` (``lat,lng`` pair).
+        Endpoint not live-probed — flagged in the tool docstring as
+        experimental.
+        """
+        url = "https://search-api.main.komoot.net/v1/search"
+        params = {"q": query, "type": kind, "limit": int(limit)}
+        if sport:
+            params["sport"] = sport
+        if near:
+            if isinstance(near, (list, tuple)) and len(near) == 2:
+                params["near"] = f"{near[0]},{near[1]}"
+            else:
+                params["near"] = str(near)
+        return await self._komoot_get(url, params=params)
+
+    async def resolve_share_url(self, share_url):
+        """Parse a share URL and fetch the underlying tour.
+
+        Accepts URLs of the shape
+        ``https://www.komoot.com/tour/{tour_id}?share_token={t}``. If
+        ``share_token`` is present we authenticate via the query param
+        (no Basic auth — the share token is the cap). Otherwise we hit
+        the normal authenticated endpoint.
+        """
+        import re
+        from urllib.parse import urlparse, parse_qs
+
+        m = re.search(r"/tour/(\d+)", share_url)
+        if not m:
+            raise KomootAPIError(
+                f"Could not extract tour id from share URL: {share_url}"
+            )
+        tour_id = m.group(1)
+        parsed = urlparse(share_url)
+        qs = parse_qs(parsed.query)
+        share_token = qs.get("share_token", [None])[0]
+
+        url = f"https://api.komoot.de/v007/tours/{tour_id}"
+        params = {}
+        if share_token:
+            params["share_token"] = share_token
+            data = await self._komoot_get(url, params=params, no_auth=True)
+        else:
+            data = await self._komoot_get(url, params=params)
+        return {"tour_id": tour_id, "share_token": share_token, "tour": data}
+
+    # --- Misc (Phase 3) --------------------------------------------
+
+    async def get_trailview(self, lat, lng, radius_m=500):
+        """Komoot Trailview photos near a point (endpoint inferred).
+
+        Best-guess URL based on the JS-bundle subdomain entry
+        ``trailview-api.maps.komoot.net/api/v1``. Not live-probed.
+        """
+        url = "https://trailview-api.maps.komoot.net/api/v1/photos"
+        params = {
+            "lat": float(lat),
+            "lng": float(lng),
+            "radius": int(radius_m),
+        }
+        return await self._komoot_get(url, params=params)
+
+    async def get_peaks_bagged(self, user_id):
+        """``GET /v4/peaks/bagged/{user_id}/{username}`` (path inferred).
+
+        The bundle scan showed two id slots
+        (``/v4/peaks/bagged/{id}/{username}``). We use the same id in
+        both slots as a best-guess — many Komoot endpoints accept the
+        numeric user_id where the docs say "username". If this 404s,
+        the caller can pass a different value and we'll surface it.
+        """
+        uid = user_id
+        url = f"https://api.komoot.de/v4/peaks/bagged/{uid}/{uid}"
+        return await self._komoot_get(url)
