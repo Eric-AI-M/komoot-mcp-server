@@ -1,5 +1,9 @@
+import json
 import os
+
 import openrouteservice
+import requests
+
 
 class RoutingError(Exception):
     pass
@@ -72,7 +76,63 @@ class RoutingManager:
                 "https://openrouteservice.org/dev/#/signup), or set "
                 "ORS_API_KEY when running in stdio mode."
             )
+        self._key = key
         self.client = openrouteservice.Client(key=key)
+
+    def _fetch_gpx(self, *, profile, coordinates, options, radiuses):
+        """POST to ORS ``directions/{profile}/gpx`` and return XML text.
+
+        Issue #11: the ``openrouteservice`` Python client routes every
+        response through ``_get_body``, which calls ``response.json()``.
+        For ``format="gpx"`` the body is XML, so ``json.JSONDecodeError``
+        fires and the client raises ``HTTPError(response.status_code)``
+        — i.e. ``HTTP Error: 200`` on a perfectly successful request.
+        Our previous ``except Exception`` block surfaced that as
+        "Route planning failed: HTTP Error: 200" to the user.
+
+        We sidestep the client and POST ourselves for the GPX format
+        only; the GeoJSON call (which IS valid JSON) still goes through
+        ``client.directions``.
+        """
+        body: dict = {"coordinates": coordinates}
+        if options:
+            body["options"] = options
+        if radiuses:
+            body["radiuses"] = radiuses
+        body["elevation"] = True
+
+        url = (
+            f"{self.client._base_url}/v2/directions/{profile}/gpx"
+        )
+        headers = {
+            "Authorization": self._key,
+            "Content-Type": "application/json",
+            "Accept": "application/gpx+xml, application/xml",
+        }
+        try:
+            resp = requests.post(
+                url,
+                data=json.dumps(body),
+                headers=headers,
+                timeout=self.client._timeout,
+            )
+        except requests.exceptions.Timeout as e:
+            raise RoutingError(f"OpenRouteService timed out fetching GPX: {e}")
+        except requests.exceptions.RequestException as e:
+            raise RoutingError(f"OpenRouteService transport error: {e}")
+
+        if resp.status_code != 200:
+            # Try to surface a useful body (ORS returns JSON for errors
+            # even when GPX was requested).
+            try:
+                err = resp.json()
+            except ValueError:
+                err = resp.text[:500]
+            raise RoutingError(
+                f"OpenRouteService GPX request failed "
+                f"(status {resp.status_code}): {err}"
+            )
+        return resp.text
 
     def _build_options(self, profile, prefer_trails, avoid_roads):
         # Both prefer_trails and avoid_roads previously appended
@@ -136,7 +196,8 @@ class RoutingManager:
         radiuses = [_DEFAULT_SNAP_RADIUS_M] * len(coords)
 
         try:
-            # Get directions
+            # GeoJSON for summary + parsed coords; JSON shape is what the
+            # vendored ORS client expects, so this path is unchanged.
             result = self.client.directions(
                 coordinates=coords,
                 profile=profile,
@@ -147,20 +208,25 @@ class RoutingManager:
                 extra_info=["surface", "waytype"],
                 radiuses=radiuses,
             )
-
-            # Request GPX separately
-            gpx_result = self.client.directions(
-                coordinates=coords,
-                profile=profile,
-                format="gpx",
-                options=options,
-                elevation=True,
-                radiuses=radiuses,
-            )
         except openrouteservice.exceptions.ApiError as e:
             raise RoutingError(f"OpenRouteService error: {e}")
+        except openrouteservice.exceptions.HTTPError as e:
+            raise RoutingError(f"OpenRouteService transport error: {e}")
+        except RoutingError:
+            raise
         except Exception as e:
             raise RoutingError(f"Route planning failed: {e}")
+
+        # GPX format is XML — the ORS client unconditionally calls
+        # ``response.json()`` on it and raises ``HTTPError(200)``. Fetch
+        # it ourselves over plain HTTP. See ``_fetch_gpx`` for the long
+        # version of why.
+        gpx_result = self._fetch_gpx(
+            profile=profile,
+            coordinates=coords,
+            options=options,
+            radiuses=radiuses,
+        )
 
         feature = result["features"][0]
         props = feature["properties"]
