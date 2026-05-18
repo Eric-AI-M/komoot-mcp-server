@@ -232,10 +232,41 @@ class KomootClient:
         api = self._get_api()
         tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            # ``Tour.__init__`` populates ``self.path`` (List[Waypoint])
-            # via ``_create_list_waypoints``; read it directly.
-            return getattr(tour, "path", None) or []
+            # Way-type breakdown lives on ``tour.summary.way_types``
+            # (List[kompy.way_type.WayType]) — each carries ``.type`` and
+            # ``.amount``. The previous code returned ``tour.path`` (a
+            # list of ``Waypoint`` objects with no ``__repr__``), so the
+            # MCP tool surfaced raw ``<...Waypoint object at 0x...>``
+            # strings. Mirror ``get_tour_surfaces``'s serializer shape:
+            # emit plain dicts the tool layer can render.
+            #
+            # NOTE: kompy's WayType constructor takes ``way_type=...`` but
+            # stores it as ``self.type``. We accept both attribute names
+            # to stay compatible with the MagicMock-based tests, which
+            # set ``way_type=...`` directly on the mock.
+            summary = getattr(tour, "summary", None)
+            if summary is None:
+                return []
+            return [self._way_type_to_dict(w)
+                    for w in (getattr(summary, "way_types", None) or [])]
         return []
+
+    @staticmethod
+    def _way_type_to_dict(w):
+        """Serialize a ``kompy.way_type.WayType`` to ``{way_type, fraction}``.
+
+        kompy stores the readable type string under ``.type`` (its
+        constructor kwarg is ``way_type`` but the attribute is renamed).
+        We fall back to ``.way_type`` for test mocks that mirror the
+        kwarg name.
+        """
+        name = getattr(w, "type", None)
+        if name is None:
+            name = getattr(w, "way_type", None)
+        return {
+            "way_type": name,
+            "fraction": getattr(w, "amount", None),
+        }
 
     async def get_tour_surfaces(self, tour_id):
         api = self._get_api()

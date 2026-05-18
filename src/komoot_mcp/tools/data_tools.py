@@ -95,7 +95,18 @@ def register(mcp):
             if not way_types:
                 return "No way type data found."
             if isinstance(way_types, list):
-                return f"Way types for tour {tour_id}:\n" + "\n".join(f"  {w}" for w in way_types)
+                lines = [f"Way types for tour {tour_id}:"]
+                for w in way_types:
+                    if isinstance(w, dict):
+                        name = w.get("way_type", "?")
+                        frac = w.get("fraction")
+                        if isinstance(frac, (int, float)):
+                            lines.append(f"  {name}: {frac * 100:.1f}%")
+                        else:
+                            lines.append(f"  {name}: {frac}")
+                    else:
+                        lines.append(f"  {w}")
+                return "\n".join(lines)
             return f"Way types for tour {tour_id}: {way_types}"
         except Exception as e:
             return f"Error getting way types: {e}"
