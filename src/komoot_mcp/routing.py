@@ -12,6 +12,54 @@ SPORT_PROFILES = {
     "gravel_ride": "cycling-regular",
 }
 
+# ORS only allows specific avoid_features values per profile family. Sending
+# the wrong one (e.g. "highways" on cycling-mountain) causes a request-wide
+# 400 with error 2003. Source: ORS docs — routing-options.md.
+# https://github.com/giscience/openrouteservice/blob/main/docs/api-reference/endpoints/directions/routing-options.md
+_AVOID_FEATURES_BY_FAMILY = {
+    "driving": {"highways", "tollways", "ferries"},
+    "cycling": {"steps", "ferries", "fords"},
+    "foot": {"ferries", "fords", "steps"},
+}
+
+# Snap-radius default in ORS is 350m, which is too tight for geocoder hits
+# that land off-network (e.g. atop a station's building footprint). Extend
+# to 1km per waypoint to cover the common cases the user hit.
+_DEFAULT_SNAP_RADIUS_M = 1000
+
+
+def _profile_family(profile: str) -> str:
+    """Map an ORS profile name to its avoid-features family."""
+    if profile.startswith("driving"):
+        return "driving"
+    if profile.startswith("cycling"):
+        return "cycling"
+    if profile.startswith("foot"):
+        return "foot"
+    # Unknown family — default to the most restrictive (foot).
+    return "foot"
+
+
+def _filter_avoid_features(profile: str, requested: list[str]) -> list[str]:
+    """Drop avoid-features values the given profile doesn't accept."""
+    allowed = _AVOID_FEATURES_BY_FAMILY.get(_profile_family(profile), set())
+    return [f for f in requested if f in allowed]
+
+
+def _to_lon_lat(coord):
+    """Convert an internal ``(lat, lon)`` coord to the ``[lon, lat]`` ORS
+    expects. Accepts tuple/list of length 2+ (alt is ignored). The whole
+    server stores geocoded points as ``(lat, lon)`` — historically the
+    routing layer forwarded those unchanged to ORS, which produced
+    400/error-2010 "Could not find routable point" because ORS searched
+    for the network in the wrong hemisphere/region.
+    """
+    if coord is None:
+        return None
+    lat, lon = coord[0], coord[1]
+    return [float(lon), float(lat)]
+
+
 class RoutingManager:
     def __init__(self, api_key: str | None = None):
         # Per-request key wins; fall back to env for stdio/local-dev so
@@ -26,18 +74,34 @@ class RoutingManager:
             )
         self.client = openrouteservice.Client(key=key)
 
-    def _build_options(self, sport, prefer_trails, avoid_roads):
-        avoid_features = []
+    def _build_options(self, profile, prefer_trails, avoid_roads):
+        # Both prefer_trails and avoid_roads previously appended
+        # "highways", which ORS rejects for any cycling-* or foot-*
+        # profile. Build a profile-aware avoid_features list instead.
+        # For cycling we add "steps" (closest analog to "no rough
+        # stairs") for prefer_trails; "fords" for avoid_roads can be
+        # debated — leaving avoid_roads as a no-op on cycling/foot
+        # rather than silently sending an unsupported feature.
+        requested: list[str] = []
+        family = _profile_family(profile)
         if prefer_trails:
-            avoid_features.append("highways")
+            if family == "driving":
+                # Drivers wanting "trails" really mean "avoid highways".
+                requested.append("highways")
+            elif family == "cycling":
+                # Bikers wanting trails want to avoid steps & fords.
+                requested.append("steps")
+            # foot-* has no good "prefer trails" toggle in avoid_features.
         if avoid_roads:
-            # ORS only accepts a fixed enum for avoid_features. "secondary"
-            # is not in the spec — adding it makes the API reject the
-            # whole request with HTTP 400.
-            avoid_features.append("highways")
+            if family == "driving":
+                requested.append("highways")
+            # On cycling/foot, "avoid_roads" doesn't map to any ORS
+            # avoid_features value — leave the request open rather than
+            # ship an invalid one. Prefer_trails covers the steps case.
+        avoid_features = _filter_avoid_features(profile, list(set(requested)))
         options = {}
         if avoid_features:
-            options["avoid_features"] = list(set(avoid_features))
+            options["avoid_features"] = avoid_features
         return options if options else None
 
     def plan_route(self, start, end=None, roundtrip=False, target_distance_km=None,
@@ -49,8 +113,8 @@ class RoutingManager:
         if roundtrip:
             if not target_distance_km:
                 raise RoutingError("target_distance_km is required for roundtrip routing")
-            coords = [start]
-            options = self._build_options(sport, prefer_trails, avoid_roads) or {}
+            coords = [_to_lon_lat(start)]
+            options = self._build_options(profile, prefer_trails, avoid_roads) or {}
             options["round_trip"] = {
                 "length": int(target_distance_km * 1000),
                 "points": 3,
@@ -59,11 +123,17 @@ class RoutingManager:
         else:
             if not end:
                 raise RoutingError("end point is required for point-to-point routing")
-            coords = [start]
+            coords = [_to_lon_lat(start)]
             if waypoints:
-                coords.extend(waypoints)
-            coords.append(end)
-            options = self._build_options(sport, prefer_trails, avoid_roads)
+                coords.extend(_to_lon_lat(wp) for wp in waypoints)
+            coords.append(_to_lon_lat(end))
+            options = self._build_options(profile, prefer_trails, avoid_roads)
+
+        # Extend ORS's snap radius per waypoint. Default 350m is too tight
+        # for geocoder hits that land on building footprints; 1km covers
+        # the named-place + lat/lng failures the user reported (error 2010
+        # "Could not find routable point within a radius of 350.0 meters").
+        radiuses = [_DEFAULT_SNAP_RADIUS_M] * len(coords)
 
         try:
             # Get directions
@@ -75,6 +145,7 @@ class RoutingManager:
                 instructions=True,
                 elevation=True,
                 extra_info=["surface", "waytype"],
+                radiuses=radiuses,
             )
 
             # Request GPX separately
@@ -84,6 +155,7 @@ class RoutingManager:
                 format="gpx",
                 options=options,
                 elevation=True,
+                radiuses=radiuses,
             )
         except openrouteservice.exceptions.ApiError as e:
             raise RoutingError(f"OpenRouteService error: {e}")
