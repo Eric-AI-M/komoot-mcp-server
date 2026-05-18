@@ -99,3 +99,49 @@ def register(mcp):
             return f"Tour {tour_id} deleted."
         except Exception as e:
             return f"Error deleting tour: {e}"
+
+    @mcp.tool()
+    async def komoot_modify_tour_extended(
+        tour_id: int,
+        description: str = None,
+        gear: str = None,
+        date: str = None,
+        status: str = None,
+        name: str = None,
+        sport: str = None,
+    ) -> str:
+        """Modify extended tour metadata (description, gear, date, etc.).
+
+        Wider field coverage than ``komoot_modify_tour`` — uses Komoot's
+        REST PATCH endpoint directly so we can update fields kompy
+        doesn't expose. Only non-None fields are sent in the PATCH body
+        so callers can update arbitrary subsets without clobbering
+        existing values.
+
+        Args:
+            tour_id: The numeric tour ID
+            description: Long-form description text
+            gear: Gear / equipment used (string)
+            date: ISO-8601 date string (e.g. "2026-05-18T08:00:00Z")
+            status: Visibility ('public', 'private', 'friends')
+            name: New tour name
+            sport: Sport type (e.g. 'hike', 'touringbicycle')
+        """
+        try:
+            await get_client().modify_tour_extended(
+                tour_id, description=description, gear=gear, date=date,
+                status=status, name=name, sport=sport,
+            )
+        except Exception as e:
+            return f"Error modifying tour: {e}"
+        updated = [
+            label for label, val in [
+                ("description", description), ("gear", gear),
+                ("date", date), ("status", status),
+                ("name", name), ("sport", sport),
+            ] if val is not None
+        ]
+        return (
+            f"Tour {tour_id} updated. "
+            f"Fields set: {', '.join(updated) if updated else 'none'}"
+        )

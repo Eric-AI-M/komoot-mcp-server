@@ -392,3 +392,188 @@ def register(mcp):
             return str(profile)
         except Exception as e:
             return f"Error getting profile: {e}"
+
+    @mcp.tool()
+    async def komoot_get_tour_photos(
+        tour_id: int, page: int = 0, limit: int = 5,
+    ) -> str:
+        """Get the cover/photo images attached to a tour.
+
+        Returns a bullet list of image URLs (resolved to width=800 from
+        Komoot's templated URL placeholders).
+
+        Args:
+            tour_id: The numeric tour ID
+            page: Page number (0-indexed)
+            limit: Results per page
+        """
+        try:
+            data = await get_client().get_tour_photos(
+                tour_id, page=page, limit=limit,
+            )
+        except Exception as e:
+            return f"Error getting tour photos: {e}"
+
+        items = _hal_items(data)
+        if not items:
+            return f"No photos found for tour {tour_id}."
+
+        lines = [f"Tour {tour_id} photos ({len(items)} on page {page}):"]
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            img_id = it.get("id", "?")
+            src = it.get("src") or ""
+            # Komoot returns templated URLs like
+            # ``https://...?width={width}&height={height}&crop={crop}``.
+            # Render at 800 wide so callers get a usable preview URL.
+            resolved = (
+                src.replace("{width}", "800")
+                .replace("{height}", "600")
+                .replace("{crop}", "true")
+            )
+            rating = it.get("rating")
+            line = f"  [{img_id}] {resolved}"
+            if rating is not None:
+                line += f" (rating={rating})"
+            lines.append(line)
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def komoot_get_tour_line(tour_id: int) -> str:
+        """Get a tour's simplified line geometry (lightweight alt to coordinates).
+
+        Returns the coordinate count and a 5-point sample of waypoints.
+        Use ``komoot_get_tour_coordinates`` for the full coordinate
+        array.
+
+        Args:
+            tour_id: The numeric tour ID
+        """
+        try:
+            data = await get_client().get_tour_line(tour_id)
+        except Exception as e:
+            return f"Error getting tour line: {e}"
+
+        coords = []
+        if isinstance(data, dict):
+            for key in ("coordinates", "items", "points"):
+                v = data.get(key)
+                if isinstance(v, list):
+                    coords = v
+                    break
+
+        if not coords:
+            return (
+                f"Tour {tour_id} line: no coordinate-shaped payload found "
+                f"(raw response keys: {list(data.keys()) if isinstance(data, dict) else type(data).__name__})"
+            )
+
+        lines = [f"Tour {tour_id} line: {len(coords)} points"]
+        for i, c in enumerate(coords[:5]):
+            if isinstance(c, dict):
+                lines.append(
+                    f"  [{i}] lat={c.get('lat')}, lng={c.get('lng')}, "
+                    f"alt={c.get('alt', '?')}"
+                )
+            elif isinstance(c, (list, tuple)) and len(c) >= 2:
+                alt = c[2] if len(c) >= 3 else "?"
+                lines.append(f"  [{i}] lat={c[0]}, lng={c[1]}, alt={alt}")
+        if len(coords) > 5:
+            lines.append(f"  ... and {len(coords) - 5} more points")
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def komoot_list_user_highlights(
+        user_id: str, page: int = 0, limit: int = 20,
+    ) -> str:
+        """List a user's saved highlights (POIs).
+
+        Args:
+            user_id: The Komoot user_id (numeric, as string)
+            page: Page number (0-indexed)
+            limit: Max items per page
+        """
+        try:
+            data = await get_client().list_user_highlights(
+                user_id, page=page, limit=limit,
+            )
+        except Exception as e:
+            return f"Error listing user highlights: {e}"
+
+        items = _hal_items(data)
+        if not items:
+            return f"No highlights found for user {user_id}."
+        lines = [
+            f"Highlights for user {user_id} (page {page}, {len(items)} items):"
+        ]
+        for h in items:
+            if not isinstance(h, dict):
+                continue
+            hid = h.get("id", "?")
+            name = h.get("name") or "?"
+            sport = h.get("sports") or h.get("sport") or "?"
+            cat = h.get("category") or h.get("type") or "?"
+            lines.append(f"  [{hid}] {name} | sport={sport} | {cat}")
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def komoot_get_peaks_bagged(user_id: str) -> str:
+        """Get peaks the user has "bagged" (peak-bagging gamification).
+
+        EXPERIMENTAL: endpoint path ``/v4/peaks/bagged/{id}/{username}``
+        has two id slots; we pass the same user_id in both. Komoot may
+        return 404 if a separate username is required — open a follow-up
+        if so.
+
+        Args:
+            user_id: The Komoot user_id (numeric, as string)
+        """
+        try:
+            data = await get_client().get_peaks_bagged(user_id)
+        except Exception as e:
+            return f"Error getting peaks bagged: {e}"
+
+        items = _hal_items(data)
+        if not items:
+            return f"No bagged peaks found for user {user_id}."
+        lines = [f"Bagged peaks for user {user_id} ({len(items)}):"]
+        for p in items[:20]:
+            if not isinstance(p, dict):
+                continue
+            pid = p.get("id") or p.get("peak_id") or "?"
+            name = p.get("name") or "?"
+            elev = p.get("elevation") or p.get("altitude")
+            line = f"  [{pid}] {name}"
+            if elev is not None:
+                line += f" | {elev}m"
+            lines.append(line)
+        if len(items) > 20:
+            lines.append(f"  ... and {len(items) - 20} more peaks")
+        return "\n".join(lines)
+
+
+def _hal_items(data):
+    """Extract a HAL-style items list from a Komoot response.
+
+    Komoot uses HAL+JSON for paginated collections — items live under
+    ``_embedded.items``. Fall back to a top-level ``items`` or
+    ``content`` for non-HAL responses.
+    """
+    if not isinstance(data, dict):
+        return []
+    emb = data.get("_embedded")
+    if isinstance(emb, dict):
+        items = emb.get("items")
+        if isinstance(items, list):
+            return items
+        # Sometimes the embed key matches the resource name (e.g.
+        # ``cover_images`` on tours, ``highlights`` on users).
+        for v in emb.values():
+            if isinstance(v, list):
+                return v
+    for key in ("items", "content"):
+        v = data.get(key)
+        if isinstance(v, list):
+            return v
+    return []

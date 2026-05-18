@@ -25,6 +25,9 @@ from komoot_mcp.tools import (
     write_tools,
     routing_tools,
     discover_tools,
+    highlight_tools,
+    collection_tools,
+    share_tools,
 )
 
 
@@ -56,6 +59,9 @@ def create_server(host="127.0.0.1", port=8000):
     write_tools.register(mcp)
     routing_tools.register(mcp)
     discover_tools.register(mcp)
+    highlight_tools.register(mcp)
+    collection_tools.register(mcp)
+    share_tools.register(mcp)
 
     return mcp
 
