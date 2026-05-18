@@ -86,7 +86,7 @@ Once connected, you can ask Claude things like:
 - "Geocode 'Marienplatz Munich'"
 - "What way types and surfaces does tour 12345 have?"
 
-## Available Tools (16)
+## Available Tools (20)
 
 ### Authentication
 
@@ -100,6 +100,9 @@ Once connected, you can ask Claude things like:
 |---|---|
 | `komoot_list_tours` | List your tours with filters for sport type, visibility, name search, sorting, and pagination |
 | `komoot_get_tour` | Get full details of a specific tour (distance, elevation, duration, difficulty) |
+| `komoot_get_tour_full` | Hydrate a tour in ONE call — replaces 5+ chained calls. Returns name, sport, distance, elevation, surface/way-type breakdown, direction step count, and any timeline highlight IDs (resolve with `komoot_get_highlight`). |
+| `komoot_get_highlight` | Resolve a Komoot highlight (POI) by ID. Returns name, category, sport, location. Pass `include_tips=True` for community tips and `include_recommenders=True` for the recommender count. |
+| `komoot_tour_weather` | Weather forecast along a tour (EXPERIMENTAL — endpoint signature may need runtime verification). Hits Komoot's dedicated weather-along-tour service. |
 | `komoot_get_user_profile` | Retrieve your Komoot profile information |
 
 ### Tour Data
@@ -122,6 +125,12 @@ Once connected, you can ask Claude things like:
 | `komoot_upload_tour` | Upload a GPX, FIT, or TCX file as a new Komoot tour. Pass `sport=` to choose the activity type (default `touringbicycle`). |
 | `komoot_modify_tour` | Modify a tour's metadata (name, sport type, visibility) |
 | `komoot_delete_tour` | Permanently delete a tour |
+
+### Discovery
+
+| Tool | Description |
+|---|---|
+| `komoot_recommend_tours_near` | Discover tours, smart tours, and collections near a `(lat, lng)` point. Optional `sport` filter; returns name, sport, distance, and a share URL per item. |
 
 ### Routing & Geocoding
 
