@@ -145,6 +145,10 @@ class TestPlanAndUploadTool:
         assert captured_upload["sport"] == "mtb"
         # Custom tour name flows through.
         assert captured_upload["tour_name"] == "MTB loop"
+        # The whole point of this tool: a planned route, NOT a
+        # recorded activity. The user said "save this route to
+        # Komoot" — they did not just ride 70 km.
+        assert captured_upload["tour_type"] == "tour_planned"
         # The plan kwargs were threaded through.
         assert routing.last["roundtrip"] is True
         assert routing.last["target_distance_km"] == 70
@@ -287,6 +291,10 @@ class TestUploadGpxCaptureId:
         def fake_post(url, auth=None, headers=None, params=None, data=None, **kwargs):
             assert "tours" in url
             assert params["data_type"] == "gpx"
+            # Default for this helper is now tour_planned — uploading
+            # a planned route should NOT show up as a completed
+            # activity in the user's Komoot tour list.
+            assert params["type"] == "tour_planned"
             return _FakeKomootResponse(status_code=201, body={"id": 555})
 
         monkeypatch.setattr(client_mod.requests, "post", fake_post)
@@ -295,6 +303,32 @@ class TestUploadGpxCaptureId:
             gpx_content=GPX_SAMPLE, sport="hike", tour_name="x",
         )
         assert out == {"id": 555, "status": "uploaded"}
+
+    @pytest.mark.asyncio
+    async def test_tour_type_override_passes_through(self, client, monkeypatch):
+        """A caller can still request ``tour_recorded`` (e.g. for a
+        future "upload my real GPS recording" path) — the helper must
+        forward whatever ``tour_type`` it's given, not hard-code one."""
+        api = MagicMock()
+        api.authentication = MagicMock()
+        api.authentication.get_email_address = MagicMock(return_value="t@x.com")
+        api.authentication.get_password = MagicMock(return_value="pw")
+        client._api = api
+
+        from komoot_mcp import client as client_mod
+
+        seen = {}
+
+        def fake_post(url, auth=None, headers=None, params=None, data=None, **kwargs):
+            seen.update(params)
+            return _FakeKomootResponse(status_code=201, body={"id": 1})
+
+        monkeypatch.setattr(client_mod.requests, "post", fake_post)
+
+        await client.upload_gpx_capture_id(
+            gpx_content=GPX_SAMPLE, sport="hike", tour_type="tour_recorded",
+        )
+        assert seen["type"] == "tour_recorded"
 
     @pytest.mark.asyncio
     async def test_202_marks_duplicate(self, client, monkeypatch):
