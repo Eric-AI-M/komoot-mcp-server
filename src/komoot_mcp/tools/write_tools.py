@@ -118,6 +118,10 @@ def register(mcp):
         so callers can update arbitrary subsets without clobbering
         existing values.
 
+        Example: ``komoot_modify_tour_extended(tour_id=2614957086,
+        description="Sunny Schwarzwald loop", gear="MTB",
+        date="2026-05-18T08:00:00Z")``.
+
         Args:
             tour_id: The numeric tour ID
             description: Long-form description text

@@ -137,16 +137,23 @@ async def test_get_tour_photos(registered_tools, auth_token):
 
 @pytest.mark.asyncio
 async def test_get_tour_line(registered_tools, auth_token):
+    # Live shape (live-probed 2026-05-18): the response uses
+    # ``geometry`` (not ``coordinates``).
     body = {
-        "coordinates": [
+        "tour_id": 42,
+        "geometry": [
             {"lat": 47.1, "lng": 11.4, "alt": 600},
             {"lat": 47.2, "lng": 11.5, "alt": 650},
-        ]
+        ],
     }
-    with _patch_request(json_body=body):
+    with _patch_request(json_body=body) as mock_req:
         from komoot_mcp.context import get_client
         _stub_kompy_auth(get_client())
         out = await registered_tools["komoot_get_tour_line"](tour_id=42)
+    # Confirm we hit the corrected URL on www.komoot.com (not
+    # api.komoot.de/.../line, which 404s).
+    called_url = mock_req.call_args.kwargs.get("url")
+    assert "www.komoot.com/api/v007/tours/42/tour_line" in called_url
     assert "Tour 42 line" in out
     assert "2 points" in out
     assert "lat=47.1" in out
@@ -252,12 +259,18 @@ async def test_smart_tours_near(registered_tools, auth_token):
         {"id": 100, "name": "Alps Loop", "sport": "mountainbike",
          "distance": 25000, "elevation_up": 1200},
     ]}}
-    with _patch_request(json_body=body):
+    with _patch_request(json_body=body) as mock_req:
         from komoot_mcp.context import get_client
         _stub_kompy_auth(get_client())
         out = await registered_tools["komoot_smart_tours_near"](
             lat=47.0, lng=11.0, sport="mountainbike",
         )
+    # Confirm we hit the corrected from_location URL.
+    called_url = mock_req.call_args.kwargs.get("url")
+    assert "discover_tours/from_location" in called_url
+    params = mock_req.call_args.kwargs.get("params") or {}
+    assert params.get("sport") == "mountainbike"
+    assert params.get("max_distance") == 20000
     assert "Smart Tours" in out
     assert "Alps Loop" in out
     assert "25.0 km" in out
@@ -269,28 +282,20 @@ async def test_smart_tour_for_highlight(registered_tools, auth_token):
         {"id": 200, "name": "Round trip", "sport": "hike",
          "distance": 8000},
     ]}}
-    with _patch_request(json_body=body):
+    with _patch_request(json_body=body) as mock_req:
         from komoot_mcp.context import get_client
         _stub_kompy_auth(get_client())
         out = await registered_tools["komoot_smart_tour_for_highlight"](
-            highlight_id=99,
+            highlight_id=99, lat=47.0, lng=11.0, sport="hike",
         )
+    # Confirm we hit the corrected from_location URL with
+    # highlight_id as a query param (no for_highlight path exists).
+    called_url = mock_req.call_args.kwargs.get("url")
+    assert "discover_tours/from_location" in called_url
+    params = mock_req.call_args.kwargs.get("params") or {}
+    assert params.get("highlight_id") == 99
     assert "Round trip" in out
     assert "Suggested tours for highlight 99" in out
-
-
-@pytest.mark.asyncio
-async def test_smart_tour_for_region(registered_tools, auth_token):
-    body = {"_embedded": {"items": [
-        {"id": 300, "name": "Bavarian valleys", "sport": "racebike"},
-    ]}}
-    with _patch_request(json_body=body):
-        from komoot_mcp.context import get_client
-        _stub_kompy_auth(get_client())
-        out = await registered_tools["komoot_smart_tour_for_region"](
-            region_id="bavaria",
-        )
-    assert "Bavarian valleys" in out
 
 
 @pytest.mark.asyncio
@@ -311,16 +316,23 @@ async def test_discover_with_attributes(registered_tools, auth_token):
 
 @pytest.mark.asyncio
 async def test_route_attribute_options(registered_tools, auth_token):
-    body = {"_embedded": {"items": [
-        {"name": "scenic", "label": "Scenic"},
-        {"name": "challenging", "label": "Challenging"},
-    ]}}
-    with _patch_request(json_body=body):
+    # Live shape (live-probed 2026-05-18): plain {"route_attributes":
+    # [...]} — and ALL four query params are required.
+    body = {"route_attributes": ["waterfalls", "lakes_rivers", "cafe"]}
+    with _patch_request(json_body=body) as mock_req:
         from komoot_mcp.context import get_client
         _stub_kompy_auth(get_client())
-        out = await registered_tools["komoot_route_attribute_options"]()
-    assert "scenic" in out
-    assert "challenging" in out
+        out = await registered_tools["komoot_route_attribute_options"](
+            lat=47.9959, lng=7.8522, sport="mountainbike",
+        )
+    params = mock_req.call_args.kwargs.get("params") or {}
+    # All four required by the Komoot endpoint — missing any returns 400.
+    assert params.get("lat") == 47.9959
+    assert params.get("lng") == 7.8522
+    assert params.get("sport") == "mountainbike"
+    assert params.get("max_distance") == 20000
+    assert "waterfalls" in out
+    assert "lakes_rivers" in out
 
 
 # ----------------------------------------------------------------
@@ -347,21 +359,6 @@ async def test_get_collection(registered_tools, auth_token):
 
 
 @pytest.mark.asyncio
-async def test_list_user_collections(registered_tools, auth_token):
-    body = {"_embedded": {"items": [
-        {"id": 1, "name": "Saved rides", "number_of_tours": 5},
-    ]}}
-    with _patch_request(json_body=body):
-        from komoot_mcp.context import get_client
-        _stub_kompy_auth(get_client())
-        out = await registered_tools["komoot_list_user_collections"](
-            user_id="123",
-        )
-    assert "Saved rides" in out
-    assert "5 tours" in out
-
-
-@pytest.mark.asyncio
 async def test_get_collection_tours(registered_tools, auth_token):
     body = {"_embedded": {"items": [
         {"_embedded": {"tour": {
@@ -380,22 +377,8 @@ async def test_get_collection_tours(registered_tools, auth_token):
 
 
 # ----------------------------------------------------------------
-# Search & resolvers (2)
+# Resolvers (1)
 # ----------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_search(registered_tools, auth_token):
-    body = {"_embedded": {"items": [
-        {"id": 700, "name": "Berlin city loop", "sport": "racebike"},
-    ]}}
-    with _patch_request(json_body=body):
-        from komoot_mcp.context import get_client
-        _stub_kompy_auth(get_client())
-        out = await registered_tools["komoot_search"](
-            query="Berlin", near="52.5,13.4",
-        )
-    assert "Berlin city loop" in out
-
 
 @pytest.mark.asyncio
 async def test_resolve_share_url(registered_tools, auth_token):
@@ -413,41 +396,6 @@ async def test_resolve_share_url(registered_tools, auth_token):
     assert "tour 12345" in out
     assert "Shared loop" in out
     assert "Share token: abc" in out
-
-
-# ----------------------------------------------------------------
-# Misc (2)
-# ----------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_get_trailview(registered_tools, auth_token):
-    body = {"_embedded": {"items": [
-        {"id": 800, "url": "https://photos.komoot.de/t/1.jpg",
-         "distance": 120},
-    ]}}
-    with _patch_request(json_body=body):
-        from komoot_mcp.context import get_client
-        _stub_kompy_auth(get_client())
-        out = await registered_tools["komoot_get_trailview"](
-            lat=47.0, lng=11.0,
-        )
-    assert "[800]" in out
-    assert "120m away" in out
-
-
-@pytest.mark.asyncio
-async def test_get_peaks_bagged(registered_tools, auth_token):
-    body = {"_embedded": {"items": [
-        {"id": 900, "name": "Zugspitze", "elevation": 2962},
-    ]}}
-    with _patch_request(json_body=body):
-        from komoot_mcp.context import get_client
-        _stub_kompy_auth(get_client())
-        out = await registered_tools["komoot_get_peaks_bagged"](
-            user_id="123",
-        )
-    assert "Zugspitze" in out
-    assert "2962m" in out
 
 
 # ----------------------------------------------------------------

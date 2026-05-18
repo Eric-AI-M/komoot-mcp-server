@@ -86,7 +86,7 @@ Once connected, you can ask Claude things like:
 - "Geocode 'Marienplatz Munich'"
 - "What way types and surfaces does tour 12345 have?"
 
-## Available Tools (40)
+## Available Tools (35)
 
 ### Authentication
 
@@ -105,7 +105,6 @@ Once connected, you can ask Claude things like:
 | `komoot_get_tour_line` | Get a tour's simplified line geometry (lightweight alt to coordinates) |
 | `komoot_get_highlight` | Resolve a Komoot highlight (POI) by ID. Returns name, category, sport, location. Pass `include_tips=True` for community tips and `include_recommenders=True` for the recommender count. |
 | `komoot_list_user_highlights` | List a user's saved highlights (POIs) |
-| `komoot_get_peaks_bagged` | Get peaks the user has "bagged" (EXPERIMENTAL — endpoint inferred) |
 | `komoot_tour_weather` | Weather forecast along a tour (EXPERIMENTAL — endpoint signature may need runtime verification). Hits Komoot's dedicated weather-along-tour service. |
 | `komoot_get_user_profile` | Retrieve your Komoot profile information |
 
@@ -134,7 +133,6 @@ Once connected, you can ask Claude things like:
 | Tool | Description |
 |---|---|
 | `komoot_get_collection` | Get a Komoot collection's metadata |
-| `komoot_list_user_collections` | List collections owned by a user (EXPERIMENTAL — endpoint inferred) |
 | `komoot_get_collection_tours` | List the tours inside a collection |
 
 ### Sharing
@@ -158,14 +156,11 @@ Once connected, you can ask Claude things like:
 
 | Tool | Description |
 |---|---|
-| `komoot_recommend_tours_near` | Discover tours, smart tours, and collections near a `(lat, lng)` point. Optional `sport` filter; returns name, sport, distance, and a share URL per item. |
-| `komoot_smart_tours_near` | Recommend Smart Tours near a point (EXPERIMENTAL — endpoint inferred) |
-| `komoot_smart_tour_for_highlight` | Suggested tours that pass through a highlight |
-| `komoot_smart_tour_for_region` | Suggested tours inside a region |
-| `komoot_discover_with_attributes` | Discover tours filtered by route attributes (scenic, challenging, etc.) |
-| `komoot_route_attribute_options` | List the legal route-attribute names |
-| `komoot_search` | Search Komoot (EXPERIMENTAL — endpoint inferred) |
-| `komoot_get_trailview` | Get Komoot Trailview photos near a point (EXPERIMENTAL — endpoint inferred) |
+| `komoot_recommend_tours_near` | Discover a mixed bag (tours, smart tours, collections) near a `(lat, lng)` point via the umbrella `/discover/{lat,lng}/elements/` endpoint. Optional `sport` filter. |
+| `komoot_smart_tours_near` | Smart Tours only near a point (uses `/discover_tours/from_location/`). Narrower than `komoot_recommend_tours_near` — Smart Tours, not collections. |
+| `komoot_smart_tour_for_highlight` | Smart Tours that pass through a specific highlight (POI). Requires `lat`/`lng` near the highlight — Komoot's API needs a location even with a highlight ID. |
+| `komoot_discover_with_attributes` | Discover tours near a point, filtered by route attributes (e.g. `waterfalls`, `lakes_rivers`). |
+| `komoot_route_attribute_options` | List the legal route-attribute names for a given `(lat, lng, sport, max_distance)` context. Call this first to pick attributes for `komoot_discover_with_attributes`. |
 
 ### Routing & Geocoding
 

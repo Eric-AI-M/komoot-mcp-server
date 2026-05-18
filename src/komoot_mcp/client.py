@@ -988,8 +988,16 @@ class KomootClient:
         )
 
     async def get_tour_line(self, tour_id):
-        """``GET /v007/tours/{id}/line`` — simplified line geometry."""
-        url = f"https://api.komoot.de/v007/tours/{int(tour_id)}/line"
+        """``GET /api/v007/tours/{id}/tour_line`` — simplified line geometry.
+
+        Live-probed 2026-05-18: the correct path is ``tour_line`` on
+        ``www.komoot.com/api`` (not ``api.komoot.de/.../line``, which
+        404s). Response body shape: ``{tour_id, geometry: [{lat,lng,alt},
+        ...], tourID, _links}``.
+        """
+        url = (
+            f"https://www.komoot.com/api/v007/tours/{int(tour_id)}/tour_line"
+        )
         return await self._komoot_get(url)
 
     async def create_tour_share_link(self, tour_id):
@@ -1056,47 +1064,45 @@ class KomootClient:
 
     # --- Discover / Smart Tours (Phase 3) --------------------------
 
-    async def smart_tours_near(self, lat, lng, sport, radius_km=20, limit=10):
-        """Best-effort Smart Tour lookup near a point.
+    async def smart_tours_near(self, lat, lng, sport, max_distance=20000):
+        """Smart Tours near a point.
 
-        Endpoint shape inferred from the JS-bundle scan — the primary
-        host ``smarttour-api.main.komoot.net/api/v1`` and the fallback
-        ``/v007/smart_tours/`` were not live-probed for this deployment.
-        We try the primary first; on any error we fall back. If both
-        fail the error is surfaced so the caller can iterate.
+        Live-probed 2026-05-18: the correct path is
+        ``www.komoot.com/api/v007/discover_tours/from_location/?lat&lng&sport``
+        (the ``smarttour-api.main.komoot.net`` host 404s). Returns the
+        standard HAL+JSON discover envelope with ``_embedded.items``.
+        ``max_distance`` is forwarded in metres; Komoot may clamp it.
         """
-        primary = "https://smarttour-api.main.komoot.net/api/v1/smart_tours"
+        url = (
+            "https://www.komoot.com/api/v007/discover_tours/from_location/"
+        )
         params = {
             "lat": float(lat),
             "lng": float(lng),
             "sport": sport,
-            "radius": int(float(radius_km) * 1000),
-            "limit": int(limit),
+            "max_distance": int(max_distance),
         }
-        try:
-            return await self._komoot_get(primary, params=params)
-        except KomootAPIError as primary_err:
-            fallback = "https://api.komoot.de/v007/smart_tours/"
-            try:
-                return await self._komoot_get(fallback, params=params)
-            except KomootAPIError as fallback_err:
-                raise KomootAPIError(
-                    f"smart_tours_near failed on both hosts: "
-                    f"primary={primary_err}; fallback={fallback_err}"
-                )
-
-    async def smart_tour_for_highlight(self, highlight_id, sport=None):
-        """``GET /v007/discover_tours/for_highlight/?highlight_id&sport``."""
-        url = "https://api.komoot.de/v007/discover_tours/for_highlight/"
-        params = {"highlight_id": int(highlight_id)}
-        if sport:
-            params["sport"] = sport
         return await self._komoot_get(url, params=params)
 
-    async def smart_tour_for_region(self, region_id, sport=None):
-        """``GET /v007/discover_tours/for_region/?region_id&sport``."""
-        url = "https://api.komoot.de/v007/discover_tours/for_region/"
-        params = {"region_id": region_id}
+    async def smart_tour_for_highlight(
+        self, highlight_id, lat, lng, sport=None,
+    ):
+        """Smart tours that pass through a highlight.
+
+        Live-probed 2026-05-18: there is no ``for_highlight`` path —
+        Komoot exposes this via the same ``from_location`` endpoint with
+        a ``highlight_id`` query param:
+        ``www.komoot.com/api/v007/discover_tours/from_location/?lat&lng&sport&highlight_id={id}``.
+        Returns the standard discover HAL+JSON envelope.
+        """
+        url = (
+            "https://www.komoot.com/api/v007/discover_tours/from_location/"
+        )
+        params = {
+            "lat": float(lat),
+            "lng": float(lng),
+            "highlight_id": int(highlight_id),
+        }
         if sport:
             params["sport"] = sport
         return await self._komoot_get(url, params=params)
@@ -1119,10 +1125,29 @@ class KomootClient:
                 params["attributes"] = str(attributes)
         return await self._komoot_get(url, params=params)
 
-    async def route_attribute_options(self):
-        """``GET /v007/discover_tours/route_attributes/``."""
-        url = "https://api.komoot.de/v007/discover_tours/route_attributes/"
-        return await self._komoot_get(url)
+    async def route_attribute_options(
+        self, lat, lng, sport, max_distance=20000,
+    ):
+        """Legal route-attribute names accepted by discovery.
+
+        Live-probed 2026-05-18: the endpoint
+        ``www.komoot.com/api/v007/discover_tours/route_attributes/``
+        REQUIRES all four query params — ``lat``, ``lng``, ``sport``,
+        ``max_distance``. Anything missing returns HTTP 400
+        ``MissingServletRequestParameter``. Response shape:
+        ``{route_attributes: [<name>, ...]}``.
+        """
+        url = (
+            "https://www.komoot.com/api/v007/discover_tours/"
+            "route_attributes/"
+        )
+        params = {
+            "lat": float(lat),
+            "lng": float(lng),
+            "sport": sport,
+            "max_distance": int(max_distance),
+        }
+        return await self._komoot_get(url, params=params)
 
     # --- Collections (Phase 3) -------------------------------------
 
@@ -1130,17 +1155,6 @@ class KomootClient:
         """``GET /v007/collections/{id}``."""
         url = f"https://api.komoot.de/v007/collections/{int(collection_id)}"
         return await self._komoot_get(url)
-
-    async def list_user_collections(self, user_id, page=0):
-        """``GET /v007/users/{uid}/collections/`` (path inferred from bundle).
-
-        v007 doesn't enumerate this collection list in our captured
-        endpoint map; kept under v007 because that's where the other
-        user resources live. If Komoot 404s the error surfaces the URL
-        so the caller knows what we tried.
-        """
-        url = f"https://api.komoot.de/v007/users/{user_id}/collections/"
-        return await self._komoot_get(url, params={"page": int(page)})
 
     async def get_collection_tours(self, collection_id, page=0):
         """``GET /v007/collections/{id}/compilation/``."""
@@ -1150,26 +1164,7 @@ class KomootClient:
         )
         return await self._komoot_get(url, params={"page": int(page)})
 
-    # --- Search & Resolvers (Phase 3) ------------------------------
-
-    async def search(self, query, kind="tour", sport=None, near=None, limit=10):
-        """Komoot search service (endpoint shape inferred from bundle).
-
-        We hit ``search-api.main.komoot.net/v1/search`` with ``q``,
-        ``type``, ``sport`` and an optional ``near`` (``lat,lng`` pair).
-        Endpoint not live-probed — flagged in the tool docstring as
-        experimental.
-        """
-        url = "https://search-api.main.komoot.net/v1/search"
-        params = {"q": query, "type": kind, "limit": int(limit)}
-        if sport:
-            params["sport"] = sport
-        if near:
-            if isinstance(near, (list, tuple)) and len(near) == 2:
-                params["near"] = f"{near[0]},{near[1]}"
-            else:
-                params["near"] = str(near)
-        return await self._komoot_get(url, params=params)
+    # --- Resolvers (Phase 3) ---------------------------------------
 
     async def resolve_share_url(self, share_url):
         """Parse a share URL and fetch the underlying tour.
@@ -1202,31 +1197,3 @@ class KomootClient:
             data = await self._komoot_get(url, params=params)
         return {"tour_id": tour_id, "share_token": share_token, "tour": data}
 
-    # --- Misc (Phase 3) --------------------------------------------
-
-    async def get_trailview(self, lat, lng, radius_m=500):
-        """Komoot Trailview photos near a point (endpoint inferred).
-
-        Best-guess URL based on the JS-bundle subdomain entry
-        ``trailview-api.maps.komoot.net/api/v1``. Not live-probed.
-        """
-        url = "https://trailview-api.maps.komoot.net/api/v1/photos"
-        params = {
-            "lat": float(lat),
-            "lng": float(lng),
-            "radius": int(radius_m),
-        }
-        return await self._komoot_get(url, params=params)
-
-    async def get_peaks_bagged(self, user_id):
-        """``GET /v4/peaks/bagged/{user_id}/{username}`` (path inferred).
-
-        The bundle scan showed two id slots
-        (``/v4/peaks/bagged/{id}/{username}``). We use the same id in
-        both slots as a best-guess — many Komoot endpoints accept the
-        numeric user_id where the docs say "username". If this 404s,
-        the caller can pass a different value and we'll surface it.
-        """
-        uid = user_id
-        url = f"https://api.komoot.de/v4/peaks/bagged/{uid}/{uid}"
-        return await self._komoot_get(url)

@@ -32,6 +32,8 @@ def register(mcp):
     async def komoot_get_collection(collection_id: int) -> str:
         """Get a Komoot collection's metadata.
 
+        Example: ``komoot_get_collection(collection_id=947498)``.
+
         Args:
             collection_id: The numeric collection ID
         """
@@ -65,48 +67,13 @@ def register(mcp):
         return "\n".join(lines)
 
     @mcp.tool()
-    async def komoot_list_user_collections(
-        user_id: str, page: int = 0,
-    ) -> str:
-        """List collections owned/saved by a user.
-
-        EXPERIMENTAL: path ``/v007/users/{uid}/collections/`` was
-        inferred from the JS-bundle scan; verify on first live call.
-
-        Args:
-            user_id: The Komoot user_id (numeric, as string)
-            page: Page number (0-indexed)
-        """
-        try:
-            data = await get_client().list_user_collections(
-                user_id, page=page,
-            )
-        except Exception as e:
-            return f"Error listing user collections: {e}"
-
-        items = _items(data)
-        if not items:
-            return f"No collections found for user {user_id}."
-        lines = [
-            f"Collections for user {user_id} (page {page}, {len(items)}):"
-        ]
-        for c in items:
-            if not isinstance(c, dict):
-                continue
-            cid = c.get("id", "?")
-            name = c.get("name") or c.get("title") or "?"
-            n_tours = c.get("number_of_tours") or c.get("tour_count")
-            line = f"  [{cid}] {name}"
-            if n_tours is not None:
-                line += f" ({n_tours} tours)"
-            lines.append(line)
-        return "\n".join(lines)
-
-    @mcp.tool()
     async def komoot_get_collection_tours(
         collection_id: int, page: int = 0,
     ) -> str:
         """List the tours inside a collection (compilation).
+
+        Example: ``komoot_get_collection_tours(collection_id=947498,
+        page=0)``.
 
         Args:
             collection_id: The numeric collection ID
