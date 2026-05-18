@@ -623,6 +623,85 @@ class KomootClient:
             f"Response body (first 300 chars): {snippet}"
         )
 
+    async def save_planned_tour(
+        self,
+        route_response,
+        name,
+        status="private",
+    ):
+        """Save a Komoot native-planner response as a ``tour_planned``.
+
+        Companion to :class:`komoot_mcp.routing.KomootNativePlanner`.
+        The planner's ``POST /api/routing/tour`` already returns a full
+        route blob (with ``distance``, ``duration``, ``path``,
+        ``segments``, ``_embedded.coordinates``, etc.) that this method
+        forwards verbatim to ``POST /api/v007/tours/?hl=en``, plus the
+        four fields Komoot needs to actually persist it:
+
+        * ``type: "tour_planned"`` — the magic field. Without this we
+          would get a ``tour_recorded`` (activity) record, which is the
+          exact failure mode that motivated this whole change.
+        * ``status`` — privacy (``private`` / ``public`` / ``friends``).
+        * ``name`` — user-visible tour name.
+        * ``save_options: {"origin": "route_planner"}`` — mirrors what
+          Komoot's web frontend sends so analytics treat the tour as
+          planner-origin, not API-import.
+
+        Auth is Basic ``(uid, token)`` — same flow as
+        :meth:`upload_gpx_capture_id`. Confirmed against the live API
+        with a probe that round-tripped a real Freiburg → Schauinsland
+        mountain-bike route (status 201, the saved tour's ``type``
+        field came back as ``tour_planned`` and was visible in the
+        Komoot UI under Planned Routes).
+
+        Returns ``{"id": <int>, "status": "saved"}`` on 200/201.
+        Raises ``KomootAPIError`` on any other status.
+        """
+        url = "https://www.komoot.com/api/v007/tours/?hl=en"
+        # Don't mutate the caller's dict — planner consumers might want
+        # to inspect it after we return.
+        save_body = dict(route_response)
+        save_body["type"] = "tour_planned"
+        save_body["status"] = status
+        save_body["name"] = name
+        save_body["save_options"] = {"origin": "route_planner"}
+
+        auth_pair = self._basic_auth()
+        headers = {
+            "Content-Type": "application/hal+json",
+            "Accept": "application/hal+json",
+            "User-Agent": "komoot-mcp-server",
+        }
+
+        await self.rl.acquire()
+
+        def _post():
+            return requests.post(
+                url, auth=auth_pair, headers=headers, json=save_body,
+                timeout=60,
+            )
+
+        try:
+            resp = await asyncio.to_thread(_post)
+        except Exception as e:
+            raise KomootAPIError(
+                f"Komoot save_planned_tour transport error: {e}"
+            )
+
+        if resp.status_code in (200, 201):
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            tour_id = body.get("id")
+            return {"id": tour_id, "status": "saved"}
+
+        snippet = (resp.text or "")[:300]
+        raise KomootAPIError(
+            f"Komoot rejected save_planned_tour (HTTP {resp.status_code}). "
+            f"Response body (first 300 chars): {snippet}"
+        )
+
     async def modify_tour(self, tour_id, name=None, sport=None, status=None):
         api = self._get_api()
         return await self._call(
