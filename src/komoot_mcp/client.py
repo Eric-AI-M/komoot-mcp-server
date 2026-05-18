@@ -1,10 +1,18 @@
 """Thin async wrapper around the ``kompy`` Komoot SDK.
 
-NOTE — RELIANCE ON KOMPY INTERNALS:
-The ``get_tour_directions``, ``get_tour_way_types``, ``get_tour_surfaces``
-and ``get_tour_timeline`` helpers below call private ``Tour._create_*``
-methods. These are not part of the kompy public API and may break in
-future versions, so we pin ``kompy<0.1.0`` in ``pyproject.toml``.
+NOTE — RELIANCE ON KOMPY ATTRIBUTES:
+``Tour.__init__`` eagerly populates ``tour.summary`` (TourSummary),
+``tour.tour_information`` (List[TourInformation]), ``tour.segments``
+(List[Segment]) and ``tour.path`` (List[Waypoint]) from the underlying
+API response when the corresponding keys are present. We read those
+populated attributes directly rather than re-calling the private
+``Tour._create_*`` static methods — those are staticmethods that take
+the *raw dict slices* (e.g. ``tour['summary']``), which we don't have
+once kompy has constructed the Tour object. Calling them as instance
+methods (the previous shape) raised
+``missing 1 required positional argument: 'tour_summary'`` /
+``'tour_information_array'``. We still pin ``kompy<0.1.0`` in
+``pyproject.toml`` for stability.
 
 NOTE — ASYNC SHAPE:
 All API methods are coroutines. They wrap synchronous kompy calls in
@@ -159,15 +167,33 @@ class KomootClient:
         api = self._get_api()
         tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            coords = await asyncio.to_thread(tour.generate_coordinates)
-            return coords if coords else []
+            # kompy's Tour.generate_coordinates requires the Authentication
+            # object — the connector populates ``api.authentication`` post-
+            # login. Passing it via positional arg matches the kompy
+            # signature exactly. The call mutates ``tour.coordinates`` and
+            # returns a bool; we return the populated list (or []).
+            ok = await asyncio.to_thread(
+                tour.generate_coordinates, api.authentication,
+            )
+            if not ok:
+                return []
+            return tour.coordinates or []
         return []
 
     async def get_tour_gpx(self, tour_id, filepath=None):
         api = self._get_api()
         tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            gpx_data = await asyncio.to_thread(tour.generate_gpx_track)
+            # kompy's Tour.generate_gpx_track requires the Authentication
+            # object — the connector populates ``api.authentication`` post-
+            # login. Previously we called it with no args, which raised
+            # ``missing 1 required positional argument: 'authentication'``.
+            # The call mutates ``tour.gpx_track`` and returns True/False;
+            # we read the GPX object off the tour after the call.
+            await asyncio.to_thread(
+                tour.generate_gpx_track, api.authentication,
+            )
+            gpx_data = getattr(tour, "gpx_track", None)
             if gpx_data is None:
                 raise KomootAPIError("Failed to generate GPX")
             gpx_str = gpx_data.to_xml() if hasattr(gpx_data, "to_xml") else str(gpx_data)
@@ -183,37 +209,91 @@ class KomootClient:
         api = self._get_api()
         tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            # Relies on kompy internal — see module docstring.
-            segments = await asyncio.to_thread(tour._create_list_segments)
-            return segments if segments else []
+            # ``Tour.__init__`` already populates ``self.segments`` via
+            # ``_create_list_segments`` when the API response has a
+            # 'segments' key — read it directly. Calling the static
+            # ``_create_list_segments`` as a bound method previously
+            # raised ``missing 1 required positional argument``.
+            segments = getattr(tour, "segments", None) or []
+            return [self._segment_to_dict(s) for s in segments]
         return []
+
+    @staticmethod
+    def _segment_to_dict(segment):
+        boundaries = getattr(segment, "segment_boundaries", None)
+        return {
+            "type": getattr(segment, "segment_type", None),
+            "reference": getattr(segment, "reference", None),
+            "from": getattr(boundaries, "start_index_point", None) if boundaries else None,
+            "to": getattr(boundaries, "end_index_point", None) if boundaries else None,
+        }
 
     async def get_tour_way_types(self, tour_id):
         api = self._get_api()
         tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            # Relies on kompy internal — see module docstring.
-            waypoints = await asyncio.to_thread(tour._create_list_waypoints)
-            return waypoints if waypoints else []
+            # ``Tour.__init__`` populates ``self.path`` (List[Waypoint])
+            # via ``_create_list_waypoints``; read it directly.
+            return getattr(tour, "path", None) or []
         return []
 
     async def get_tour_surfaces(self, tour_id):
         api = self._get_api()
         tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            # Relies on kompy internal — see module docstring.
-            info = await asyncio.to_thread(tour._create_tour_information)
-            return info if info else {}
-        return {}
+            # ``Tour.__init__`` populates ``self.tour_information``
+            # (List[TourInformation]) via ``_create_tour_information``
+            # when the API response has 'tour_information' — read it
+            # directly. Returning a list (was {}) since the underlying
+            # attribute is a list of TourInformation objects.
+            tour_info = getattr(tour, "tour_information", None) or []
+            return [
+                {
+                    "type": getattr(ti, "tour_information_type", None),
+                    "segments": [
+                        {
+                            "from": getattr(s, "start_index_point", None),
+                            "to": getattr(s, "end_index_point", None),
+                        }
+                        for s in (getattr(ti, "segments", None) or [])
+                    ],
+                }
+                for ti in tour_info
+            ]
+        return []
 
     async def get_tour_timeline(self, tour_id):
         api = self._get_api()
         tour = await self._call(api.get_tour_by_id, str(tour_id))
         if isinstance(tour, kompy.Tour):
-            # Relies on kompy internal — see module docstring.
-            summary = await asyncio.to_thread(tour._create_tour_summary)
-            return summary if summary else {}
-        return {}
+            # ``Tour.__init__`` populates ``self.summary`` (TourSummary)
+            # via ``_create_tour_summary`` when the API response has a
+            # 'summary' key — read it directly. Previously we called the
+            # static ``_create_tour_summary`` with no args, which raised
+            # ``missing 1 required positional argument: 'tour_summary'``.
+            #
+            # The kompy ``TourSummary`` carries two lists (surfaces +
+            # way_types). Flatten them into a single list of dicts the
+            # existing data_tools renderer can iterate over — preserves
+            # the public tool signature (still returns a list-like).
+            summary = getattr(tour, "summary", None)
+            if summary is None:
+                return []
+            events = []
+            for s in getattr(summary, "surfaces", None) or []:
+                events.append({
+                    "type": "surface",
+                    "description": f"{getattr(s, 'surface_type', '?')} "
+                                   f"({getattr(s, 'amount', 0)})",
+                })
+            for w in getattr(summary, "way_types", None) or []:
+                events.append({
+                    "type": "way_type",
+                    "description": f"{getattr(w, 'way_type', '?')} "
+                                   f"({getattr(w, 'amount', 0)})",
+                })
+            return events
+        return []
 
     async def upload_tour(self, filepath, data_type=None, sport="touringbicycle"):
         import gpxpy
