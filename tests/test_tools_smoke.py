@@ -141,12 +141,12 @@ class TestPerRequestAuthManager:
         am = AuthManager(email="eve@x.com", password="pw")
         token = set_auth_manager(am)
         try:
-            # Patch the Authentication stub to raise — handler should catch
-            # and produce an error string (not the silent fallback dict).
-            # Patch on the shared kompy module object so the reference in
-            # client.py also sees the change.
+            # Patch the KomootConnector stub to raise on construction —
+            # handler should catch and produce an error string (not the
+            # silent fallback dict). Patch on the shared kompy module
+            # object so the reference in client.py also sees the change.
             with patch.object(
-                kompy, "Authentication", side_effect=RuntimeError("boom"),
+                kompy, "KomootConnector", side_effect=RuntimeError("boom"),
             ):
                 out = await registered["komoot_get_user_profile"]()
             assert "Error getting profile" in out

@@ -33,17 +33,35 @@ def _install_kompy_stub_if_missing() -> None:
         def __init__(self, email, password):
             self._email = email
             self._password = password
+            self._username = None
+            self._token = None
 
         def get_username(self):
-            return f"user-{self._email}"
+            # Mirror real kompy behavior: raise if login hasn't populated
+            # the username, so we catch any regression that bypasses login.
+            if self._username is None:
+                raise ValueError("No username set, please login first.")
+            return self._username
 
         def get_email_address(self):
             return self._email
+
+        def set_username(self, username):
+            self._username = username
+
+        def set_token(self, token):
+            self._token = token
 
     class _StubConnector:
         def __init__(self, email, password):
             self.email = email
             self.password = password
+            # Real kompy.KomootConnector.__init__ performs login and
+            # populates ``self.authentication`` with the username/token.
+            # Mirror that shape so ``get_user_profile`` works in tests.
+            self.authentication = _StubAuthentication(email, password)
+            self.authentication.set_username(f"user-{email}")
+            self.authentication.set_token("stub-token")
 
         def get_tours(self, **kwargs):
             return [_StubTour(1, f"tour-for-{self.email}")]

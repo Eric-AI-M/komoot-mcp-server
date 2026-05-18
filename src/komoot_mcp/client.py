@@ -62,16 +62,18 @@ class KomootClient:
             raise KomootAPIError(f"Komoot API error: {msg}")
 
     async def get_user_profile(self):
-        # Surfaces kompy errors so handlers can surface them; the
-        # previous silent fallback masked auth/network failures and
-        # made debugging painful.
-        self._get_api()  # validates credentials are present
-        auth_obj = await asyncio.to_thread(
-            kompy.Authentication, self.auth.email, self.auth.password
-        )
+        # KomootConnector.__init__ already performs the login HTTP call
+        # and populates ``self.authentication`` with the token + username
+        # (see kompy.komoot_connector). The previous code constructed a
+        # second ``kompy.Authentication`` directly, which has no ``.login``
+        # method, so calling ``.get_username()`` raised "No username set,
+        # please login first." The earlier silent ``except`` masked that
+        # bug; with the swallow removed we now correctly read the username
+        # off the already-authenticated connector instead.
+        api = self._get_api()
         return {
-            "username": await asyncio.to_thread(auth_obj.get_username),
-            "email": await asyncio.to_thread(auth_obj.get_email_address),
+            "username": await asyncio.to_thread(api.authentication.get_username),
+            "email": await asyncio.to_thread(api.authentication.get_email_address),
         }
 
     async def list_tours(
