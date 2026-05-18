@@ -50,15 +50,30 @@ HEALTH_PATH = "/health"
 
 
 class InternalSecretMiddleware:
-    """Reject non-internal traffic when ``INTERNAL_SECRET`` is set."""
+    """Reject non-internal traffic when ``INTERNAL_SECRET`` is set.
+
+    Accepts two Authorization header formats emitted by the platform gateway:
+
+    * ``Bearer <INTERNAL_SECRET>`` — legacy/direct form.
+    * ``Bearer Internal-gateway:<GATEWAY_SECRET>`` — gateway-prefixed form
+      (used when ``GATEWAY_SECRET`` is set on the gateway side).
+
+    On rejection, returns a valid JSON-RPC 2.0 error body with code -32001
+    (server-defined unauthorized, mirrors Bitrix's -32000 shape).
+
+    Env vars are read at request time so credential rotation works without
+    restart.
+    """
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
-        # Cache at construction time — env doesn't change during request lifetime.
-        self.secret = os.environ.get("INTERNAL_SECRET")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not self.secret:
+        # Read at request time so rotation works without restart.
+        secret = os.environ.get("INTERNAL_SECRET")
+        gateway_secret = os.environ.get("GATEWAY_SECRET")
+
+        if scope["type"] != "http" or not secret:
             await self.app(scope, receive, send)
             return
 
@@ -68,15 +83,34 @@ class InternalSecretMiddleware:
             return
 
         # Header names are case-insensitive (HTTP/1.1 RFC 7230 §3.2); lowercase
-        # them for lookup. The value, however, must match the Bearer prefix
-        # case-sensitively to mirror the Bitrix reference (`auth !== \`Bearer ${secret}\``).
+        # them for lookup. The value must match the Bearer prefix case-sensitively
+        # to mirror the Bitrix reference (`auth !== \`Bearer ${secret}\``).
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         provided = headers.get(INTERNAL_SECRET_HEADER)
-        expected = f"{BEARER_PREFIX}{self.secret}"
-        if provided != expected:
+
+        expected_direct = f"{BEARER_PREFIX}{secret}"
+        expected_gateway = (
+            f"{BEARER_PREFIX}Internal-gateway:{gateway_secret}"
+            if gateway_secret
+            else None
+        )
+
+        if provided == expected_direct:
+            pass
+        elif expected_gateway is not None and provided == expected_gateway:
+            pass
+        else:
             response = JSONResponse(
-                {"error": "unauthorized"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32001,
+                        "message": "unauthorized: missing or invalid Authorization header",
+                    },
+                },
                 status_code=401,
+                media_type="application/json",
             )
             await response(scope, receive, send)
             return
