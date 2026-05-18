@@ -34,6 +34,9 @@ def register(mcp):
     ) -> str:
         """Get photos attached to a Komoot highlight (POI).
 
+        Example: ``komoot_get_highlight_images(highlight_id=15829,
+        page=0)``.
+
         Args:
             highlight_id: The numeric highlight ID
             page: Page number (0-indexed)
@@ -77,6 +80,9 @@ def register(mcp):
 
         Lighter alternative to ``komoot_get_highlight(include_tips=True)``
         — only the tips, no metadata round-trip.
+
+        Example: ``komoot_get_highlight_tips(highlight_id=15829,
+        page=0)``.
 
         Args:
             highlight_id: The numeric highlight ID

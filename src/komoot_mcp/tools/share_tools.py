@@ -17,6 +17,8 @@ def register(mcp):
         Returns the share token + a directly-clickable URL of the shape
         ``https://www.komoot.com/tour/{tour_id}?share_token={token}``.
 
+        Example: ``komoot_create_share_link(tour_id=2614957086)``.
+
         Args:
             tour_id: The numeric tour ID (must be a tour you own)
         """
@@ -52,6 +54,8 @@ def register(mcp):
 
         After this, any previously-issued share URL stops working.
 
+        Example: ``komoot_revoke_share_link(tour_id=2614957086)``.
+
         Args:
             tour_id: The numeric tour ID
         """
@@ -69,6 +73,8 @@ def register(mcp):
         ``https://www.komoot.com/tour/{tour_id}?share_token={t}``.
         When ``share_token`` is present in the URL, the share token is
         used as the auth cap — no login needed.
+
+        Example: ``komoot_resolve_share_url(share_url="https://www.komoot.com/tour/2614957086?share_token=a1b2c3")``.
 
         Args:
             share_url: The full share URL

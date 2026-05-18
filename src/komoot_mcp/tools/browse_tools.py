@@ -402,6 +402,9 @@ def register(mcp):
         Returns a bullet list of image URLs (resolved to width=800 from
         Komoot's templated URL placeholders).
 
+        Example: ``komoot_get_tour_photos(tour_id=2614957086, page=0,
+        limit=5)``.
+
         Args:
             tour_id: The numeric tour ID
             page: Page number (0-indexed)
@@ -447,6 +450,8 @@ def register(mcp):
         Use ``komoot_get_tour_coordinates`` for the full coordinate
         array.
 
+        Example: ``komoot_get_tour_line(tour_id=2614957086)``.
+
         Args:
             tour_id: The numeric tour ID
         """
@@ -457,7 +462,9 @@ def register(mcp):
 
         coords = []
         if isinstance(data, dict):
-            for key in ("coordinates", "items", "points"):
+            # Live response uses ``geometry``; older shape used
+            # ``coordinates``/``items``/``points`` — accept all.
+            for key in ("geometry", "coordinates", "items", "points"):
                 v = data.get(key)
                 if isinstance(v, list):
                     coords = v
@@ -489,6 +496,9 @@ def register(mcp):
     ) -> str:
         """List a user's saved highlights (POIs).
 
+        Example: ``komoot_list_user_highlights(user_id="2069076024",
+        page=0, limit=20)``.
+
         Args:
             user_id: The Komoot user_id (numeric, as string)
             page: Page number (0-indexed)
@@ -515,41 +525,6 @@ def register(mcp):
             sport = h.get("sports") or h.get("sport") or "?"
             cat = h.get("category") or h.get("type") or "?"
             lines.append(f"  [{hid}] {name} | sport={sport} | {cat}")
-        return "\n".join(lines)
-
-    @mcp.tool()
-    async def komoot_get_peaks_bagged(user_id: str) -> str:
-        """Get peaks the user has "bagged" (peak-bagging gamification).
-
-        EXPERIMENTAL: endpoint path ``/v4/peaks/bagged/{id}/{username}``
-        has two id slots; we pass the same user_id in both. Komoot may
-        return 404 if a separate username is required — open a follow-up
-        if so.
-
-        Args:
-            user_id: The Komoot user_id (numeric, as string)
-        """
-        try:
-            data = await get_client().get_peaks_bagged(user_id)
-        except Exception as e:
-            return f"Error getting peaks bagged: {e}"
-
-        items = _hal_items(data)
-        if not items:
-            return f"No bagged peaks found for user {user_id}."
-        lines = [f"Bagged peaks for user {user_id} ({len(items)}):"]
-        for p in items[:20]:
-            if not isinstance(p, dict):
-                continue
-            pid = p.get("id") or p.get("peak_id") or "?"
-            name = p.get("name") or "?"
-            elev = p.get("elevation") or p.get("altitude")
-            line = f"  [{pid}] {name}"
-            if elev is not None:
-                line += f" | {elev}m"
-            lines.append(line)
-        if len(items) > 20:
-            lines.append(f"  ... and {len(items) - 20} more peaks")
         return "\n".join(lines)
 
 
