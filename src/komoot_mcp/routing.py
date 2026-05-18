@@ -22,6 +22,11 @@ _AVOID_FEATURES_BY_FAMILY = {
     "foot": {"ferries", "fords", "steps"},
 }
 
+# Snap-radius default in ORS is 350m, which is too tight for geocoder hits
+# that land off-network (e.g. atop a station's building footprint). Extend
+# to 1km per waypoint to cover the common cases the user hit.
+_DEFAULT_SNAP_RADIUS_M = 1000
+
 
 def _profile_family(profile: str) -> str:
     """Map an ORS profile name to its avoid-features family."""
@@ -39,6 +44,20 @@ def _filter_avoid_features(profile: str, requested: list[str]) -> list[str]:
     """Drop avoid-features values the given profile doesn't accept."""
     allowed = _AVOID_FEATURES_BY_FAMILY.get(_profile_family(profile), set())
     return [f for f in requested if f in allowed]
+
+
+def _to_lon_lat(coord):
+    """Convert an internal ``(lat, lon)`` coord to the ``[lon, lat]`` ORS
+    expects. Accepts tuple/list of length 2+ (alt is ignored). The whole
+    server stores geocoded points as ``(lat, lon)`` — historically the
+    routing layer forwarded those unchanged to ORS, which produced
+    400/error-2010 "Could not find routable point" because ORS searched
+    for the network in the wrong hemisphere/region.
+    """
+    if coord is None:
+        return None
+    lat, lon = coord[0], coord[1]
+    return [float(lon), float(lat)]
 
 
 class RoutingManager:
@@ -94,7 +113,7 @@ class RoutingManager:
         if roundtrip:
             if not target_distance_km:
                 raise RoutingError("target_distance_km is required for roundtrip routing")
-            coords = [start]
+            coords = [_to_lon_lat(start)]
             options = self._build_options(profile, prefer_trails, avoid_roads) or {}
             options["round_trip"] = {
                 "length": int(target_distance_km * 1000),
@@ -104,11 +123,17 @@ class RoutingManager:
         else:
             if not end:
                 raise RoutingError("end point is required for point-to-point routing")
-            coords = [start]
+            coords = [_to_lon_lat(start)]
             if waypoints:
-                coords.extend(waypoints)
-            coords.append(end)
+                coords.extend(_to_lon_lat(wp) for wp in waypoints)
+            coords.append(_to_lon_lat(end))
             options = self._build_options(profile, prefer_trails, avoid_roads)
+
+        # Extend ORS's snap radius per waypoint. Default 350m is too tight
+        # for geocoder hits that land on building footprints; 1km covers
+        # the named-place + lat/lng failures the user reported (error 2010
+        # "Could not find routable point within a radius of 350.0 meters").
+        radiuses = [_DEFAULT_SNAP_RADIUS_M] * len(coords)
 
         try:
             # Get directions
@@ -120,6 +145,7 @@ class RoutingManager:
                 instructions=True,
                 elevation=True,
                 extra_info=["surface", "waytype"],
+                radiuses=radiuses,
             )
 
             # Request GPX separately
@@ -129,6 +155,7 @@ class RoutingManager:
                 format="gpx",
                 options=options,
                 elevation=True,
+                radiuses=radiuses,
             )
         except openrouteservice.exceptions.ApiError as e:
             raise RoutingError(f"OpenRouteService error: {e}")
