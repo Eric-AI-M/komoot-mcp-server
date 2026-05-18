@@ -14,13 +14,16 @@ Two concerns:
 2. **Per-tenant credentials.** The gateway forwards the calling user's
    Komoot creds as JSON in ``x-user-credentials``:
 
-       {"email": "user@example.com", "password": "..."}
+       {"email": "user@example.com", "password": "...", "ors_api_key": "..."}
 
    The middleware parses that header, builds an :class:`AuthManager`,
    pushes it into the request-local ContextVar via
    :func:`komoot_mcp.context.set_auth_manager`, and resets after the
-   downstream handler returns. If the header is absent (e.g. stdio
-   mode), the env-var fallback in :mod:`komoot_mcp.context` kicks in.
+   downstream handler returns. The optional ``ors_api_key`` field is
+   pushed into a separate ContextVar via
+   :func:`komoot_mcp.context.set_ors_api_key` so routing tools can pick
+   it up per-request. If the header is absent (e.g. stdio mode), the
+   env-var fallback in :mod:`komoot_mcp.context` kicks in.
 """
 from __future__ import annotations
 
@@ -36,7 +39,9 @@ from komoot_mcp.auth import AuthManager
 from komoot_mcp.context import (
     clear_request_state,
     reset_auth_manager,
+    reset_ors_api_key,
     set_auth_manager,
+    set_ors_api_key,
 )
 
 
@@ -136,7 +141,8 @@ class UserCredentialsMiddleware:
 
         request = Request(scope)
         creds_header = request.headers.get(USER_CREDENTIALS_HEADER)
-        token = None
+        auth_token = None
+        ors_token = None
         if creds_header:
             try:
                 creds = json.loads(creds_header)
@@ -148,18 +154,26 @@ class UserCredentialsMiddleware:
                 password = creds.get("password")
                 if email and password:
                     auth = AuthManager(email=email, password=password)
-                    token = set_auth_manager(auth)
+                    auth_token = set_auth_manager(auth)
+                ors_api_key = creds.get("ors_api_key")
+                if ors_api_key:
+                    ors_token = set_ors_api_key(ors_api_key)
 
         try:
             await self.app(scope, receive, send)
         finally:
             # Always reset — never let one tenant's creds outlive the request.
-            if token is not None:
+            if auth_token is not None:
                 try:
-                    reset_auth_manager(token)
+                    reset_auth_manager(auth_token)
                 except (ValueError, LookupError):
                     # ContextVar reset can fail across task boundaries; fall
                     # back to a hard clear so we don't leak state.
+                    clear_request_state()
+            if ors_token is not None:
+                try:
+                    reset_ors_api_key(ors_token)
+                except (ValueError, LookupError):
                     clear_request_state()
             # Belt-and-braces: also drop the lazily-built KomootClient so the
             # next request doesn't see a stale instance bound to old creds.

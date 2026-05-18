@@ -89,7 +89,11 @@ def register(mcp):
         """
         routing = get_routing_manager()
         if routing is None:
-            return "Route planning is not available. Set ORS_API_KEY environment variable."
+            return (
+                "Error: ORS API key not configured for this org. "
+                "Add it in the dashboard under Komoot credentials "
+                "(free signup at https://openrouteservice.org/dev/#/signup)."
+            )
 
         try:
             geocoder = get_geocoder()
