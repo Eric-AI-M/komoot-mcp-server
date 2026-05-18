@@ -86,7 +86,7 @@ Once connected, you can ask Claude things like:
 - "Geocode 'Marienplatz Munich'"
 - "What way types and surfaces does tour 12345 have?"
 
-## Available Tools (15)
+## Available Tools (16)
 
 ### Authentication
 
@@ -128,7 +128,8 @@ Once connected, you can ask Claude things like:
 | Tool | Description |
 |---|---|
 | `komoot_geocode` | Geocode a place name or reverse-geocode coordinates using Komoot's Photon API |
-| `komoot_plan_route` | Plan a route using OpenRouteService with sport profiles, trail/road preferences, roundtrip support, and optional waypoints. Returns the GPX content inline in the response so the caller can save or forward it directly. |
+| `komoot_plan_route` | Plan a route using OpenRouteService with sport profiles, trail/road preferences, roundtrip support, and optional waypoints. Returns the GPX content (in Komoot-compatible track format) inline in the response so the caller can save or forward it directly. |
+| `komoot_plan_and_upload` | Plan a route via OpenRouteService and upload it to Komoot in one server-side operation. Returns the new tour ID and URL — no GPX is round-tripped through the conversation. Use this when you want a planned route added to your Komoot tours without ~100k tokens of GPX flowing through the LLM. |
 
 #### Sport Profiles
 

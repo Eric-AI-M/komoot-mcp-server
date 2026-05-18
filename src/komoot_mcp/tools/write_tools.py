@@ -48,9 +48,23 @@ def register(mcp):
                 gpx_content=gpx_content,
                 tour_name=tour_name,
             )
-            return f"Tour uploaded successfully: {result}"
         except Exception as e:
             return f"Error uploading tour: {e}"
+
+        # Issue #17: don't render the raw kompy bool. The client now
+        # raises on False, so any value reaching here is a success.
+        # Render a tour ID and URL when the client returned them
+        # (currently only via ``upload_gpx_capture_id`` /
+        # ``komoot_plan_and_upload``); fall back to a plain success line
+        # because kompy's bool-only return drops the new tour ID.
+        if isinstance(result, dict) and result.get("id"):
+            tid = result["id"]
+            return (
+                f"Tour uploaded successfully.\n"
+                f"  Tour ID: {tid}\n"
+                f"  URL: https://www.komoot.com/tour/{tid}"
+            )
+        return "Tour uploaded successfully."
 
     @mcp.tool()
     async def komoot_modify_tour(

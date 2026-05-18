@@ -46,6 +46,9 @@ def _install_kompy_stub_if_missing() -> None:
         def get_email_address(self):
             return self._email
 
+        def get_password(self):
+            return self._password
+
         def set_username(self, username):
             self._username = username
 

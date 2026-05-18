@@ -275,7 +275,18 @@ class TestRoutingManagerGpxFetchAvoidsHttp200Bug:
         out = manager.plan_route(
             start=(49.0, 8.4), end=(49.01, 8.41), sport="hike",
         )
-        assert out["gpx"] == gpx_body
+        # As of issue #18, plan_route post-processes the ORS GPX into
+        # track format before returning. The body therefore won't match
+        # ``gpx_body`` byte-for-byte. Verify the route data round-trips
+        # through the transform: input had one <trk>, output still has
+        # at least one <trk>.
+        assert "<trk>" in out["gpx"]
+        # And opt-in raw mode returns the original ORS body verbatim.
+        raw = manager.plan_route(
+            start=(49.0, 8.4), end=(49.01, 8.41), sport="hike",
+            _raw_ors_gpx=True,
+        )
+        assert raw["gpx"] == gpx_body
         assert out["distance_km"] == 5.5
         assert captured["url"].endswith("/v2/directions/foot-hiking/gpx")
         assert captured["headers"]["Authorization"] == "k"

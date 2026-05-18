@@ -25,6 +25,7 @@ import asyncio
 import os
 
 import kompy
+import requests
 
 
 class KomootAPIError(Exception):
@@ -375,9 +376,18 @@ class KomootClient:
         For non-GPX uploads (FIT/TCX) the legacy ``filepath`` path is
         still required because those are binary formats.
 
+        Returns a dict ``{"id": <tour_id|None>, "status": "uploaded"}``
+        on success. Issue #17: previously this returned the raw kompy
+        bool, which the tool layer rendered as
+        ``Tour uploaded successfully: False`` on the failure path. We
+        now raise ``KomootAPIError`` on a False return so the tool
+        layer's except-block surfaces a real error message instead of
+        masking failure under "successfully".
+
         Raises ``KomootAPIError`` if neither ``gpx_content`` nor
         ``filepath`` is supplied, or if ``filepath`` doesn't exist (the
-        error message points at ``gpx_content`` for the gateway case).
+        error message points at ``gpx_content`` for the gateway case),
+        or if Komoot rejects the upload.
         """
         import gpxpy
 
@@ -400,12 +410,13 @@ class KomootClient:
                 )
             tour_obj = gpxpy.parse(gpx_content)
             name = tour_name or self._extract_gpx_name(tour_obj) or "tour"
-            return await self._call(
+            raw = await self._call(
                 api.upload_tour,
                 tour_object=tour_obj,
                 activity_type=sport,
                 tour_name=name,
             )
+            return self._normalize_upload_result(raw)
 
         # --- filepath path (stdio / local-dev backward compat) ---
         if filepath is None:
@@ -438,21 +449,54 @@ class KomootClient:
         if data_type == "gpx":
             with open(filepath, "r") as f:
                 tour_obj = gpxpy.parse(f)
-            return await self._call(
+            raw = await self._call(
                 api.upload_tour,
                 tour_object=tour_obj,
                 activity_type=sport,
                 tour_name=name,
             )
+            return self._normalize_upload_result(raw)
         else:
             with open(filepath, "rb") as f:
                 tour_obj = f.read()
-            return await self._call(
+            raw = await self._call(
                 api.upload_tour,
                 tour_object=tour_obj,
                 activity_type=sport,
                 tour_name=name,
             )
+            return self._normalize_upload_result(raw)
+
+    @staticmethod
+    def _normalize_upload_result(raw):
+        """Convert kompy's ``upload_tour`` return into a richer dict, or
+        raise on failure.
+
+        Issue #17: kompy's ``upload_tour`` returns ``bool`` (True/False)
+        and logs the HTTP status code on the server side only. False
+        used to bubble up to the tool layer and render as
+        ``Tour uploaded successfully: False``. We now:
+
+        * raise ``KomootAPIError`` on False so the tool wrapper's
+          ``except`` produces a clear error,
+        * pass through dict results (used by tests that capture upload
+          kwargs) verbatim,
+        * wrap True in a dict with ``status='uploaded'`` and ``id=None``
+          (kompy doesn't expose the new tour ID; see issue #19 for the
+          follow-up to capture it).
+        """
+        if raw is True:
+            return {"id": None, "status": "uploaded"}
+        if raw is False or raw is None:
+            raise KomootAPIError(
+                "Komoot rejected the upload (HTTP non-2xx — see server "
+                "logs for the exact status code). Common cause: the GPX "
+                "is in route format (<rte>/<rtept>) rather than track "
+                "format (<trk>/<trkseg>/<trkpt>). Use komoot_plan_and_"
+                "upload or komoot_plan_route (which now converts) "
+                "instead of raw ORS GPX."
+            )
+        return raw
 
     @staticmethod
     def _extract_gpx_name(gpx_obj):
@@ -474,6 +518,92 @@ class KomootClient:
         except Exception:
             pass
         return None
+
+    async def upload_gpx_capture_id(
+        self,
+        gpx_content,
+        sport="touringbicycle",
+        tour_name=None,
+    ):
+        """Upload a GPX directly to Komoot and return the new tour ID.
+
+        kompy's ``upload_tour`` returns only a bool — the Komoot API
+        actually responds with ``{"id": <numeric_id>, ...}`` on success
+        (HTTP 201) or duplicate (HTTP 202), but kompy throws it away.
+        For ``komoot_plan_and_upload`` (issue #19) we need that ID to
+        build a tour URL, so we POST to the same endpoint ourselves and
+        capture the response body.
+
+        Mirrors kompy's request shape (URL, auth, headers, params) so
+        Komoot's server-side behaviour is unchanged. The only difference
+        is that we read the JSON body and return its ``id``.
+
+        Returns ``{"id": <int>, "status": "uploaded"|"duplicate"}`` on
+        201/202. Raises ``KomootAPIError`` on any other status code.
+        """
+        import gpxpy as _gpxpy
+
+        api = self._get_api()
+        # Parse + canonicalize GPX in memory. gpxpy round-tripping
+        # normalizes whitespace/encoding, which Komoot tolerates fine.
+        tour_obj = _gpxpy.parse(gpx_content)
+        name = tour_name or self._extract_gpx_name(tour_obj) or "tour"
+
+        # Use the same URL kompy uses. Hard-coded here on purpose: we
+        # don't want to import a private constant from kompy that could
+        # disappear in a future version.
+        url = "https://api.komoot.de/v007/tours/?data_type=gpx"
+        params = {
+            "sport": sport,
+            # Match kompy's default privacy status (FRIENDS) to avoid
+            # surprising the user. Privacy override is a future tool
+            # parameter (see issue #19).
+            "status": "private",
+            "data_type": "gpx",
+            "name": name,
+            "time_in_motion": None,
+        }
+        headers = {"User-Agent": "komoot-mcp-server"}
+        body = tour_obj.to_xml().encode("utf-8")
+
+        await self.rl.acquire()
+
+        def _post():
+            return requests.post(
+                url=url,
+                auth=(
+                    api.authentication.get_email_address(),
+                    api.authentication.get_password(),
+                ),
+                headers=headers,
+                params=params,
+                data=body,
+            )
+
+        try:
+            resp = await asyncio.to_thread(_post)
+        except Exception as e:
+            raise KomootAPIError(f"Komoot upload transport error: {e}")
+
+        if resp.status_code in (201, 202):
+            try:
+                tour_id = resp.json().get("id")
+            except ValueError:
+                tour_id = None
+            return {
+                "id": tour_id,
+                "status": "duplicate" if resp.status_code == 202 else "uploaded",
+            }
+
+        # Failure path — surface the real status code so the caller
+        # knows whether to retry, fix the GPX, or fix credentials.
+        snippet = (resp.text or "")[:300]
+        raise KomootAPIError(
+            f"Komoot rejected the upload (HTTP {resp.status_code}). "
+            f"Common 400 cause: GPX is in route format (<rte>/<rtept>) "
+            f"rather than track format (<trk>/<trkseg>/<trkpt>). "
+            f"Response body (first 300 chars): {snippet}"
+        )
 
     async def modify_tour(self, tour_id, name=None, sport=None, status=None):
         api = self._get_api()
