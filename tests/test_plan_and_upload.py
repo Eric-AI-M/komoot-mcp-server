@@ -1,13 +1,25 @@
-"""Issue #19 — ``komoot_plan_and_upload`` single-tool plan + upload.
+"""Issue #19 / native-planner — ``komoot_plan_and_upload``.
 
 The user-facing workflow "plan a route and add it to my Komoot tours"
 previously required two MCP tool calls with a ~100k-token GPX flowing
-through the LLM in between. The new tool runs both server-side and
+through the LLM in between. The current tool runs both server-side and
 returns only the tour ID + URL.
 
-Also covers the lower-level ``upload_gpx_capture_id`` client helper,
-which captures the new tour ID from the Komoot response (kompy throws
-that away).
+History: an earlier shape of this tool went through OpenRouteService +
+``upload_gpx_capture_id``. That always wrote a ``tour_recorded``
+(activity) record in Komoot — even with ``?type=tour_planned`` on the
+query string — which made the user's planned-route saves show up as
+"I just rode this 71km MTB ride today" in their feed (issue #21
+follow-up). The tool now uses Komoot's own native planner
+(``POST /api/routing/tour``) + ``save_planned_tour``, which honors the
+``type=tour_planned`` field in the JSON body. The ORS-based
+``komoot_plan_route`` tool still exists for callers that just want raw
+GPX output without saving anything.
+
+Also covers the lower-level ``upload_gpx_capture_id`` client helper —
+kept around because ``komoot_upload_tour`` still uses it for the
+"upload a GPS recording" path where the user really did ride the
+route.
 """
 from __future__ import annotations
 
@@ -85,8 +97,16 @@ class _FakeGeocoder:
 
 
 class TestPlanAndUploadTool:
-    """The new combo tool must be registered, plan + upload, and not
-    leak the 400KB GPX to the response."""
+    """The combo tool plans via Komoot's native planner and saves the
+    response as ``tour_planned``. It must:
+
+    * register correctly,
+    * thread the public-sport → Komoot-sport name through the planner,
+    * surface plan + save errors clearly (no "successfully: False"
+      from #17),
+    * not leak the planner's giant route blob to the LLM,
+    * default tour status to ``private``.
+    """
 
     @pytest.mark.asyncio
     async def test_tool_is_registered(self):
@@ -97,165 +117,279 @@ class TestPlanAndUploadTool:
     async def test_happy_path_returns_id_and_url(self, monkeypatch):
         registered, routing_tools = _register_routing_tools()
 
-        fake_gpx = "<gpx><trk><name>plan</name></trk></gpx>"
-        fake_plan = {
-            "gpx": fake_gpx,
-            "distance_km": 12.3,
-            "elevation_gain_m": 250.0,
-            "duration_minutes": 95.0,
-            "waypoints": [(49.0, 8.4), (49.01, 8.41)],
+        fake_route = {
+            # The native planner returns hundreds of KB of coordinates
+            # under _embedded.coordinates — we use a short stub here
+            # but assert the giant blob never reaches the user-facing
+            # response.
+            "type": "tour_planned",
+            "distance": 12345.6,
+            "duration": 5400,
+            "elevation_up": 250.0,
+            "elevation_down": 220.0,
+            "path": [{"location": {"lat": 49.0, "lng": 8.4}}],
+            "segments": [{"type": "Routed", "from": 0, "to": 1}],
+            "_embedded": {"coordinates": {"items": [
+                {"lat": 49.0, "lng": 8.4, "alt": 100, "t": 0},
+            ] * 5000}},
         }
 
-        class _FakeRouting:
-            def plan_route(self, **kwargs):
-                self.last = kwargs
-                return fake_plan
+        plan_calls = []
 
-        captured_upload = {}
+        class _FakePlanner:
+            def __init__(self, auth_pair):
+                self.auth_pair = auth_pair
+
+            def plan(self, waypoints, sport_komoot, constitution=3):
+                plan_calls.append({
+                    "waypoints": waypoints,
+                    "sport_komoot": sport_komoot,
+                    "constitution": constitution,
+                })
+                return fake_route
+
+        save_calls = []
 
         class _FakeClient:
-            async def upload_gpx_capture_id(self, **kwargs):
-                captured_upload.update(kwargs)
-                return {"id": 7654321, "status": "uploaded"}
+            def _basic_auth(self):
+                return ("uid", "tok")
 
-        routing = _FakeRouting()
-        monkeypatch.setattr(routing_tools, "get_routing_manager", lambda: routing)
-        monkeypatch.setattr(routing_tools, "get_geocoder", lambda: _FakeGeocoder())
-        monkeypatch.setattr(routing_tools, "get_client", lambda: _FakeClient())
+            async def save_planned_tour(self, route_response, name,
+                                         status="private"):
+                save_calls.append({
+                    "name": name, "status": status,
+                    "route_response_id": id(route_response),
+                })
+                return {"id": 7654321, "status": "saved"}
+
+        monkeypatch.setattr(
+            routing_tools, "KomootNativePlanner", _FakePlanner,
+        )
+        monkeypatch.setattr(routing_tools, "get_geocoder",
+                            lambda: _FakeGeocoder())
+        monkeypatch.setattr(routing_tools, "get_client",
+                            lambda: _FakeClient())
 
         out = await registered["komoot_plan_and_upload"](
             start="Freiburg",
-            roundtrip=True,
-            target_distance_km=70,
+            end="Karlsruhe",
             sport="mountain_bike",
-            prefer_trails=True,
-            avoid_roads=True,
-            tour_name="MTB loop",
+            tour_name="MTB cross-country",
+            tour_status="private",
         )
 
-        # The 400KB GPX must NOT be in the response.
-        assert fake_gpx not in out
-        assert "<gpx>" not in out
+        # The giant coordinates blob MUST NOT be in the response.
+        assert '"t": 0' not in out
+        assert '"_embedded"' not in out
         # Tour ID + URL ARE in the response.
         assert "7654321" in out
         assert "https://www.komoot.com/tour/7654321" in out
-        # Plan summary surfaces too.
-        assert "12.3 km" in out
-        # Sport is mapped from our routing vocab to Komoot's: mountain_bike → mtb.
-        assert captured_upload["sport"] == "mtb"
+        # Plan summary surfaces (distance in km, derived from m).
+        assert "12.35 km" in out
+        # Sport mapping: mountain_bike → mtb on the native planner side.
+        assert plan_calls[0]["sport_komoot"] == "mtb"
         # Custom tour name flows through.
-        assert captured_upload["tour_name"] == "MTB loop"
-        # The whole point of this tool: a planned route, NOT a
-        # recorded activity. The user said "save this route to
-        # Komoot" — they did not just ride 70 km.
-        assert captured_upload["tour_type"] == "tour_planned"
-        # The plan kwargs were threaded through.
-        assert routing.last["roundtrip"] is True
-        assert routing.last["target_distance_km"] == 70
+        assert save_calls[0]["name"] == "MTB cross-country"
+        # Privacy defaults to private and surfaces in the response.
+        assert save_calls[0]["status"] == "private"
 
     @pytest.mark.asyncio
-    async def test_upload_failure_does_not_say_successfully(self, monkeypatch):
+    async def test_save_failure_does_not_claim_success(self, monkeypatch):
         registered, routing_tools = _register_routing_tools()
 
-        fake_plan = {
-            "gpx": "<gpx><trk><name>plan</name></trk></gpx>",
-            "distance_km": 12.3,
-            "elevation_gain_m": 250.0,
-            "duration_minutes": 95.0,
-            "waypoints": [(49.0, 8.4)],
+        fake_route = {
+            "distance": 12300.0, "duration": 4000,
+            "elevation_up": 250.0, "elevation_down": 220.0,
         }
 
-        class _FakeRouting:
-            def plan_route(self, **kwargs):
-                return fake_plan
+        class _FakePlanner:
+            def __init__(self, auth_pair):
+                pass
+
+            def plan(self, **kwargs):
+                return fake_route
 
         class _FakeClient:
-            async def upload_gpx_capture_id(self, **kwargs):
+            def _basic_auth(self):
+                return ("uid", "tok")
+
+            async def save_planned_tour(self, **kwargs):
                 raise KomootAPIError(
-                    "Komoot rejected the upload (HTTP 400). Common 400 "
-                    "cause: GPX is in route format (<rte>/<rtept>)..."
+                    "Komoot rejected save_planned_tour (HTTP 400). "
+                    "Response body (first 300 chars): bad body"
                 )
 
-        monkeypatch.setattr(routing_tools, "get_routing_manager", lambda: _FakeRouting())
-        monkeypatch.setattr(routing_tools, "get_geocoder", lambda: _FakeGeocoder())
-        monkeypatch.setattr(routing_tools, "get_client", lambda: _FakeClient())
+        monkeypatch.setattr(
+            routing_tools, "KomootNativePlanner", _FakePlanner,
+        )
+        monkeypatch.setattr(routing_tools, "get_geocoder",
+                            lambda: _FakeGeocoder())
+        monkeypatch.setattr(routing_tools, "get_client",
+                            lambda: _FakeClient())
 
         out = await registered["komoot_plan_and_upload"](
-            start="Freiburg", end="Karlsruhe",
-            sport="hike",
+            start="Freiburg", end="Karlsruhe", sport="hike",
         )
-        # The literal #17 shape must not appear.
         assert "successfully: False" not in out
-        # Must surface a real error.
-        assert "upload to Komoot failed" in out
+        assert "save to Komoot failed" in out
         assert "400" in out
-        # But it should still let the user know the plan succeeded.
+        # The plan distance still surfaces so the user knows the route
+        # itself was valid.
         assert "12.3 km" in out
 
     @pytest.mark.asyncio
-    async def test_plan_failure_does_not_attempt_upload(self, monkeypatch):
+    async def test_plan_failure_does_not_attempt_save(self, monkeypatch):
         registered, routing_tools = _register_routing_tools()
+        save_calls = []
 
-        upload_calls = []
+        class _FailingPlanner:
+            def __init__(self, auth_pair):
+                pass
 
-        class _FailingRouting:
-            def plan_route(self, **kwargs):
-                raise RuntimeError("ORS down")
+            def plan(self, **kwargs):
+                # Use RoutingError to mirror what the real planner raises.
+                from komoot_mcp.routing import RoutingError
+                raise RoutingError("Komoot planner request failed (HTTP 500)")
 
         class _FakeClient:
-            async def upload_gpx_capture_id(self, **kwargs):
-                upload_calls.append(kwargs)
-                return {"id": 1, "status": "uploaded"}
+            def _basic_auth(self):
+                return ("uid", "tok")
 
-        monkeypatch.setattr(routing_tools, "get_routing_manager", lambda: _FailingRouting())
-        monkeypatch.setattr(routing_tools, "get_geocoder", lambda: _FakeGeocoder())
-        monkeypatch.setattr(routing_tools, "get_client", lambda: _FakeClient())
+            async def save_planned_tour(self, **kwargs):
+                save_calls.append(kwargs)
+                return {"id": 1, "status": "saved"}
+
+        monkeypatch.setattr(
+            routing_tools, "KomootNativePlanner", _FailingPlanner,
+        )
+        monkeypatch.setattr(routing_tools, "get_geocoder",
+                            lambda: _FakeGeocoder())
+        monkeypatch.setattr(routing_tools, "get_client",
+                            lambda: _FakeClient())
 
         out = await registered["komoot_plan_and_upload"](
             start="Freiburg", end="Karlsruhe", sport="hike",
         )
         assert "Route planning failed" in out
-        assert "ORS down" in out
-        # The upload path must not have been reached.
-        assert upload_calls == []
+        assert "HTTP 500" in out
+        # The save path must not have been reached.
+        assert save_calls == []
 
     @pytest.mark.asyncio
-    async def test_no_ors_key_returns_dashboard_hint(self, monkeypatch):
-        registered, routing_tools = _register_routing_tools()
-        monkeypatch.setattr(routing_tools, "get_routing_manager", lambda: None)
-
-        out = await registered["komoot_plan_and_upload"](
-            start="Freiburg", end="Karlsruhe", sport="hike",
-        )
-        assert "ORS API key" in out
-
-    @pytest.mark.asyncio
-    async def test_duplicate_upload_renders_status(self, monkeypatch):
+    async def test_roundtrip_requires_waypoints(self, monkeypatch):
         registered, routing_tools = _register_routing_tools()
 
-        class _FakeRouting:
-            def plan_route(self, **kwargs):
-                return {
-                    "gpx": "<gpx><trk><name>x</name></trk></gpx>",
-                    "distance_km": 5.0,
-                    "elevation_gain_m": 50.0,
-                    "duration_minutes": 30.0,
-                    "waypoints": [],
-                }
+        class _NeverCalledPlanner:
+            def __init__(self, auth_pair):
+                pass
+
+            def plan(self, **kwargs):  # pragma: no cover - assertion fails first
+                raise AssertionError("planner should not be called")
 
         class _FakeClient:
-            async def upload_gpx_capture_id(self, **kwargs):
-                return {"id": 99, "status": "duplicate"}
+            def _basic_auth(self):
+                return ("uid", "tok")
 
-        monkeypatch.setattr(routing_tools, "get_routing_manager", lambda: _FakeRouting())
-        monkeypatch.setattr(routing_tools, "get_geocoder", lambda: _FakeGeocoder())
-        monkeypatch.setattr(routing_tools, "get_client", lambda: _FakeClient())
+            async def save_planned_tour(self, **kwargs):  # pragma: no cover
+                raise AssertionError("save should not be called")
+
+        monkeypatch.setattr(
+            routing_tools, "KomootNativePlanner", _NeverCalledPlanner,
+        )
+        monkeypatch.setattr(routing_tools, "get_geocoder",
+                            lambda: _FakeGeocoder())
+        monkeypatch.setattr(routing_tools, "get_client",
+                            lambda: _FakeClient())
 
         out = await registered["komoot_plan_and_upload"](
-            start="Freiburg", end="Karlsruhe", sport="hike",
+            start="Freiburg", roundtrip=True, sport="mountain_bike",
         )
-        assert "duplicate" in out
-        assert "99" in out
+        # A zero-distance roundtrip is the degenerate case — must
+        # error with a clear message, not call the planner.
+        assert "Roundtrip" in out
+        assert "waypoints" in out
+
+    @pytest.mark.asyncio
+    async def test_roundtrip_with_waypoints_threads_through(self, monkeypatch):
+        registered, routing_tools = _register_routing_tools()
+        captured = {}
+
+        class _FakePlanner:
+            def __init__(self, auth_pair):
+                pass
+
+            def plan(self, waypoints, sport_komoot, constitution=3):
+                captured["waypoints"] = waypoints
+                captured["sport"] = sport_komoot
+                return {"distance": 5000, "duration": 1800,
+                        "elevation_up": 100, "elevation_down": 100}
+
+        class _FakeClient:
+            def _basic_auth(self):
+                return ("uid", "tok")
+
+            async def save_planned_tour(self, **kwargs):
+                return {"id": 42, "status": "saved"}
+
+        monkeypatch.setattr(
+            routing_tools, "KomootNativePlanner", _FakePlanner,
+        )
+        monkeypatch.setattr(routing_tools, "get_geocoder",
+                            lambda: _FakeGeocoder())
+        monkeypatch.setattr(routing_tools, "get_client",
+                            lambda: _FakeClient())
+
+        out = await registered["komoot_plan_and_upload"](
+            start="Freiburg",
+            roundtrip=True,
+            sport="mountain_bike",
+            waypoints="47.99,7.85|47.97,7.88",
+        )
+        # The waypoints became start → vias → start.
+        wps = captured["waypoints"]
+        assert len(wps) == 4
+        assert wps[0] == wps[-1]
+        # Intermediate vias preserved in order.
+        assert wps[1] == (47.99, 7.85)
+        assert wps[2] == (47.97, 7.88)
+        assert "42" in out
+
+    @pytest.mark.asyncio
+    async def test_gravel_maps_to_touringbicycle(self, monkeypatch):
+        """Komoot has no separate gravel profile — we fold to the
+        all-rounder bike profile rather than failing or sending an
+        unknown sport token."""
+        registered, routing_tools = _register_routing_tools()
+        captured = {}
+
+        class _FakePlanner:
+            def __init__(self, auth_pair):
+                pass
+
+            def plan(self, waypoints, sport_komoot, constitution=3):
+                captured["sport"] = sport_komoot
+                return {"distance": 1, "duration": 1,
+                        "elevation_up": 0, "elevation_down": 0}
+
+        class _FakeClient:
+            def _basic_auth(self):
+                return ("uid", "tok")
+
+            async def save_planned_tour(self, **kwargs):
+                return {"id": 1, "status": "saved"}
+
+        monkeypatch.setattr(
+            routing_tools, "KomootNativePlanner", _FakePlanner,
+        )
+        monkeypatch.setattr(routing_tools, "get_geocoder",
+                            lambda: _FakeGeocoder())
+        monkeypatch.setattr(routing_tools, "get_client",
+                            lambda: _FakeClient())
+
+        await registered["komoot_plan_and_upload"](
+            start="Freiburg", end="Karlsruhe", sport="gravel_ride",
+        )
+        assert captured["sport"] == "touringbicycle"
 
 
 # ---------------------------------------------------------------------

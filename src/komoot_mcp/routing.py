@@ -61,6 +61,134 @@ SPORT_PROFILES = {
     "gravel_ride": "cycling-regular",
 }
 
+
+# Public sport identifiers → Komoot's native-planner sport vocabulary.
+# The names diverge from both ORS profiles and from kompy's upload
+# activity strings. Komoot's own planner accepts these on the
+# ``/api/routing/tour`` endpoint:
+#
+#   mtb, mountainbike, touringbicycle, racebike, e_racebike, e_mtb,
+#   jogging, hike, nordicwalking, e_touringbicycle
+#
+# Komoot does not have a separate "gravel" profile — its tour planner
+# folds gravel routing into ``touringbicycle`` (the all-rounder bike
+# profile). We document that in the tool docstring.
+NATIVE_SPORT_PROFILES = {
+    "hike": "hike",
+    "trail_run": "jogging",
+    "mountain_bike": "mtb",
+    "road_cycle": "racebike",
+    "gravel_ride": "touringbicycle",
+}
+
+
+class KomootNativePlanner:
+    """Calls Komoot's own planner endpoint instead of OpenRouteService.
+
+    Background: ``komoot_plan_and_upload`` historically went via ORS to
+    build a GPX, then uploaded the GPX as a "planned tour" (issue #21).
+    Komoot's GPX-upload endpoint always created a ``tour_recorded``
+    record though — passing ``?type=tour_planned`` did not flip the
+    record type. The right path is to use Komoot's native planner
+    (``POST /api/routing/tour``) and then save the returned route blob
+    to ``POST /api/v007/tours/?hl=en`` with ``type: tour_planned``
+    inside the JSON body, which IS honored.
+
+    Auth: Basic ``(user_id, long_lived_token)`` — the same Basic pair
+    that already authenticates ``upload_gpx_capture_id`` and all the
+    other v007 calls. Confirmed working with a live probe (status 200
+    on the planning call, 201 on the save call).
+    """
+
+    BASE = "https://www.komoot.com/api/routing/tour"
+    # Embed the full route detail: coordinates (for surface/way overlays),
+    # way_types + surfaces (for the per-segment composition), directions
+    # (for turn-by-turn). These are what Komoot's own web frontend
+    # requests, so the saved tour ends up indistinguishable from one
+    # planned in the browser.
+    _EMBED = "coordinates,way_types,surfaces,directions"
+
+    def __init__(self, auth_pair):
+        """``auth_pair``: ``(user_id, token)`` tuple for HTTP Basic auth.
+
+        The token is the long-lived password-equivalent returned by
+        Komoot's v006 login (see :class:`AuthManager.login`), NOT the
+        user's actual password. ``KomootClient._basic_auth`` builds
+        this tuple from the kompy connector.
+        """
+        self._auth = auth_pair
+
+    def plan(self, waypoints, sport_komoot, constitution=3):
+        """Plan a route through the supplied waypoints.
+
+        Args:
+            waypoints: List of ``(lat, lon)`` tuples — at least two
+                (start + end). Intermediate points become routing
+                via-points. Roundtrips: pass ``[start, start]`` plus
+                whatever extra via-points you want.
+            sport_komoot: One of the Komoot-vocabulary sport names
+                (e.g. ``"mtb"``, ``"touringbicycle"``, ``"hike"``).
+                Use :data:`NATIVE_SPORT_PROFILES` to map from our
+                public vocab.
+            constitution: Fitness self-rating 1-5; affects duration
+                estimates but not the geometry. Default 3 (average).
+
+        Returns the parsed route response dict — the same object you
+        pass to :meth:`KomootClient.save_planned_tour` to commit it.
+        Includes ``distance`` (m), ``duration`` (s), ``path``,
+        ``segments``, ``elevation_up`` / ``elevation_down``, ``query``
+        (the planner's own token), and an ``_embedded`` block with
+        coordinates, way_types, surfaces, and directions.
+        """
+        if not waypoints or len(waypoints) < 2:
+            raise RoutingError(
+                "Komoot's native planner needs at least 2 waypoints "
+                "(start + end). For a roundtrip pass the same point "
+                "twice."
+            )
+        path = [
+            {"location": {"lat": float(lat), "lng": float(lon)}}
+            for lat, lon in waypoints
+        ]
+        body = {
+            "constitution": int(constitution),
+            "sport": sport_komoot,
+            "path": path,
+            # Single "Routed" segment connecting all waypoints — this
+            # is how Komoot's frontend submits a fresh plan. We're not
+            # importing a manually-drawn geometry, so ``geometry`` is
+            # empty and Komoot fills it in.
+            "segments": [{"geometry": [], "type": "Routed"}],
+        }
+        params = {"sport": sport_komoot, "_embedded": self._EMBED}
+        try:
+            resp = requests.post(
+                self.BASE,
+                params=params,
+                auth=self._auth,
+                json=body,
+                headers={
+                    "User-Agent": "komoot-mcp-server",
+                    "Accept": "application/json",
+                },
+                timeout=60,
+            )
+        except requests.exceptions.Timeout as e:
+            raise RoutingError(f"Komoot planner timed out: {e}")
+        except requests.exceptions.RequestException as e:
+            raise RoutingError(f"Komoot planner transport error: {e}")
+
+        if resp.status_code != 200:
+            snippet = (resp.text or "")[:400]
+            raise RoutingError(
+                f"Komoot planner request failed "
+                f"(HTTP {resp.status_code}): {snippet}"
+            )
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise RoutingError(f"Komoot planner returned non-JSON: {e}")
+
 # ORS only allows specific avoid_features values per profile family. Sending
 # the wrong one (e.g. "highways" on cycling-mountain) causes a request-wide
 # 400 with error 2003. Source: ORS docs — routing-options.md.
