@@ -8,3 +8,6 @@ build/
 .venv/
 venv/
 .env
+
+# Graphify code-graph output
+graphify-out/
